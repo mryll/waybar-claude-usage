@@ -1,0 +1,535 @@
+#!/usr/bin/env bash
+# claude-usage — Claude AI plan usage widget for Waybar
+# Reads OAuth credentials from Claude CLI, shows session/weekly limits
+# with colored progress bars and Pango markup tooltip.
+#
+# Usage: claude-usage [--format FORMAT] [--tooltip-format FORMAT]
+#
+# Format placeholders:
+#   {icon}              󰚩 icon (Nerd Font)
+#   {plan}              Plan label (e.g. "Max 5x")
+#   {session_pct}       Session (5h) usage %
+#   {session_reset}     Session countdown (e.g. "1h 30m")
+#   {session_elapsed}   Session time elapsed % (e.g. "58")
+#   {session_pace}      Session pacing icon (↑ ahead, ↓ under, → on track)
+#   {session_pace_pct}  Session pacing deviation (e.g. "12% ahead")
+#   {weekly_pct}        Weekly (7d all models) usage %
+#   {weekly_reset}      Weekly countdown (e.g. "4d 1h")
+#   {weekly_elapsed}    Weekly time elapsed % (e.g. "42")
+#   {weekly_pace}       Weekly pacing icon
+#   {weekly_pace_pct}   Weekly pacing deviation
+#   {sonnet_pct}        Sonnet-only weekly usage %
+#   {sonnet_reset}      Sonnet countdown
+#   {extra_spent}       Extra usage spent (e.g. "$2.50")
+#   {extra_limit}       Extra usage monthly limit (e.g. "$50.00")
+#   {extra_balance}     Extra usage balance (e.g. "$47.50")
+#   {extra_pct}         Extra usage spent %
+#
+# Default format: "{session_pct}% · {session_reset}"
+
+set -euo pipefail
+
+# --- Parse args ---
+FORMAT="{session_pct}% · {session_reset}"
+TOOLTIP_FORMAT=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --format)
+            [[ $# -ge 2 ]] || { echo '{"text":"⚠","tooltip":"--format requires a value","class":"critical"}'; exit 0; }
+            FORMAT="$2"; shift 2 ;;
+        --tooltip-format)
+            [[ $# -ge 2 ]] || { echo '{"text":"⚠","tooltip":"--tooltip-format requires a value","class":"critical"}'; exit 0; }
+            TOOLTIP_FORMAT="$2"; shift 2 ;;
+        *) _o="${1//\\/\\\\}"; _o="${_o//\"/\\\"}"; echo '{"text":"⚠","tooltip":"Unknown option: '"$_o"'","class":"critical"}'; exit 0 ;;
+    esac
+done
+
+CREDS="$HOME/.claude/.credentials.json"
+API_URL="https://api.anthropic.com/api/oauth/usage"
+TOKEN_URL="https://console.anthropic.com/v1/oauth/token"
+CLIENT_ID="9d1c250a-e61b-44d9-88ed-5944d1962f5e" # Claude CLI OAuth client ID
+REFRESH_BUFFER=300 # refresh 5 min before expiry
+CACHE_DIR="$HOME/.cache/claude-usage"
+CACHE_TTL=60 # seconds
+
+# --- Colors (One Dark) ---
+GREEN="#98c379"
+YELLOW="#e5c07b"
+ORANGE="#d19a66"
+RED="#e06c75"
+BLUE="#61afef"
+DIM="#5c6370"
+FG="#abb2bf"
+BAR_EMPTY="#3e4451"
+BAR_LEN=20
+
+# Window durations in seconds
+SESSION_WINDOW=$(( 5 * 3600 ))      # 5 hours
+WEEKLY_WINDOW=$(( 7 * 24 * 3600 ))  # 7 days
+
+# --- Helpers ---
+
+die() {
+    if command -v jq &>/dev/null; then
+        jq -nc --arg t "󰚩 ⚠" --arg tip "$1" '{text:$t, tooltip:$tip, class:"critical"}'
+    else
+        local _m="${1//\\/\\\\}"; _m="${_m//\"/\\\"}"
+        printf '{"text":"󰚩 ⚠","tooltip":"%s","class":"critical"}\n' "$_m"
+    fi
+    exit 0
+}
+
+color_for() {
+    local p=$1
+    if   (( p >= 90 )); then printf '%s' "$RED"
+    elif (( p >= 75 )); then printf '%s' "$ORANGE"
+    elif (( p >= 50 )); then printf '%s' "$YELLOW"
+    else printf '%s' "$GREEN"
+    fi
+}
+
+make_bar() {
+    local p=$1 color=$2
+    local filled=$(( p * BAR_LEN / 100 ))
+    (( filled > BAR_LEN )) && filled=$BAR_LEN
+    local empty=$(( BAR_LEN - filled ))
+    local f="" e=""
+    printf -v f '%*s' "$filled" ''; f="${f// /█}"
+    printf -v e '%*s' "$empty"  ''; e="${e// /░}"
+    printf "%s" "<span foreground='${color}'>${f}</span><span foreground='${BAR_EMPTY}'>${e}</span>"
+}
+
+countdown() {
+    local ts=$1
+    [[ -z "$ts" ]] && { echo "—"; return; }
+    local reset now diff d h m
+    reset=$(date -d "$ts" +%s 2>/dev/null) || { echo "—"; return; }
+    now=$(date +%s)
+    diff=$(( reset - now ))
+    (( diff <= 0 )) && { echo "now"; return; }
+    d=$(( diff / 86400 ))
+    h=$(( diff % 86400 / 3600 ))
+    m=$(( diff % 3600 / 60 ))
+    if (( d > 0 )); then
+        echo "${d}d ${h}h"
+    else
+        printf '%dh %02dm' "$h" "$m"
+    fi
+}
+
+# Calculate time elapsed % and pacing for a usage window
+# Args: usage_pct resets_at window_duration_seconds
+# Outputs: elapsed_pct pace_icon pace_label
+calc_pacing() {
+    local usage_pct=$1 resets_at=$2 window_s=$3
+    local elapsed_pct=0 pace_icon="→" pace_label="on track"
+
+    if [[ -n "$resets_at" ]]; then
+        local reset_epoch now_epoch ms_left
+        reset_epoch=$(date -d "$resets_at" +%s 2>/dev/null) || { echo "0 → on track"; return; }
+        now_epoch=$(date +%s)
+        ms_left=$(( reset_epoch - now_epoch ))
+        elapsed_pct=$(( (window_s - ms_left) * 100 / window_s ))
+        (( elapsed_pct < 0 )) && elapsed_pct=0
+        (( elapsed_pct > 100 )) && elapsed_pct=100
+
+        if (( elapsed_pct > 0 )); then
+            # pacing = actual / expected. >1.05 = ahead, <0.95 = under
+            # Using integer math: pacing*100 = usage_pct * 100 / elapsed_pct
+            local pacing_x100=$(( usage_pct * 100 / elapsed_pct ))
+            if (( pacing_x100 > 105 )); then
+                local dev=$(( (pacing_x100 - 100) ))
+                pace_icon="↑"
+                pace_label="${dev}% ahead"
+            elif (( pacing_x100 < 95 )); then
+                local dev=$(( (100 - pacing_x100) ))
+                pace_icon="↓"
+                pace_label="${dev}% under"
+            fi
+        fi
+    fi
+
+    echo "${elapsed_pct} ${pace_icon} ${pace_label}"
+}
+
+# --- Pre-checks ---
+for cmd in curl jq date; do
+    command -v "$cmd" &>/dev/null || die "Missing dependency: $cmd"
+done
+[[ -f "$CREDS" ]] || die "No credentials.\nRun <b>claude</b> to log in."
+
+# --- Read credentials ---
+creds=$(<"$CREDS")
+jq -e . <<< "$creds" &>/dev/null || die "Invalid credentials file.\nRun <b>claude</b> to log in."
+access_token=$(jq -r '.claudeAiOauth.accessToken // empty' <<< "$creds")
+refresh_token=$(jq -r '.claudeAiOauth.refreshToken // empty' <<< "$creds")
+expires_at=$(jq -r '.claudeAiOauth.expiresAt // 0' <<< "$creds")
+sub_type=$(jq -r '.claudeAiOauth.subscriptionType // "unknown"' <<< "$creds")
+rate_tier=$(jq -r '.claudeAiOauth.rateLimitTier // ""' <<< "$creds")
+
+[[ -n "$access_token" ]] || die "No token.\nRun <b>claude</b> to log in."
+
+# --- Token refresh if needed ---
+now_s=$(date +%s)
+expires_at="${expires_at%%.*}" # truncate float (e.g. 5000.0 → 5000)
+[[ "$expires_at" =~ ^[0-9]+$ ]] || expires_at=0
+expires_s=$(( expires_at / 1000 ))
+auth_ok=true
+syncing=false
+
+# Helper: refresh token, fetch usage, write cache (used by background sync)
+_do_refresh_and_fetch() {
+    local _resp _at _nr _ei _nea _tmp _usage
+    for (( _try=1; _try<=3; _try++ )); do
+        sleep 2
+        _resp=$(curl -sf --max-time 5 -X POST "$TOKEN_URL" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            -d "grant_type=refresh_token&client_id=${CLIENT_ID}&refresh_token=${refresh_token}") || true
+        if [[ -n "$_resp" ]] && jq -e '.access_token' <<< "$_resp" &>/dev/null; then
+            _at=$(jq -r '.access_token' <<< "$_resp")
+            _nr=$(jq -r '.refresh_token // empty' <<< "$_resp")
+            _ei=$(jq -r '.expires_in' <<< "$_resp")
+            _nea=$(( $(date +%s) * 1000 + _ei * 1000 ))
+            _tmp=$(mktemp)
+            jq --arg at "$_at" --arg rt "${_nr:-$refresh_token}" --argjson ea "$_nea" \
+                '.claudeAiOauth.accessToken=$at | .claudeAiOauth.refreshToken=$rt | .claudeAiOauth.expiresAt=$ea' \
+                "$CREDS" > "$_tmp" && mv "$_tmp" "$CREDS"
+            _usage=$(curl -sf --max-time 10 "$API_URL" \
+                -H "Authorization: Bearer $_at" \
+                -H "anthropic-beta: oauth-2025-04-20") || true
+            if [[ -n "$_usage" ]] && jq -e '.five_hour' <<< "$_usage" &>/dev/null; then
+                mkdir -p "$CACHE_DIR"
+                local _ctmp
+                _ctmp=$(mktemp "$CACHE_DIR/.usage.XXXXXX")
+                printf '%s' "$_usage" > "$_ctmp" && mv "$_ctmp" "$CACHE_DIR/usage.json"
+                rm -f "$CACHE_DIR/.stale"
+            fi
+            return 0
+        fi
+    done
+    return 1
+}
+
+if (( expires_s < now_s + REFRESH_BUFFER )); then
+    # Quick attempt (3s timeout) — works mid-session when network is up
+    resp=$(curl -sf --max-time 3 -X POST "$TOKEN_URL" \
+        -H "Content-Type: application/x-www-form-urlencoded" \
+        -d "grant_type=refresh_token&client_id=${CLIENT_ID}&refresh_token=${refresh_token}") || true
+
+    if [[ -n "$resp" ]] && jq -e '.access_token' <<< "$resp" &>/dev/null; then
+        access_token=$(jq -r '.access_token' <<< "$resp")
+        new_refresh=$(jq -r '.refresh_token // empty' <<< "$resp")
+        expires_in=$(jq -r '.expires_in' <<< "$resp")
+        new_expires_at=$(( $(date +%s) * 1000 + expires_in * 1000 ))
+
+        tmp=$(mktemp)
+        jq --arg at "$access_token" \
+           --arg rt "${new_refresh:-$refresh_token}" \
+           --argjson ea "$new_expires_at" \
+           '.claudeAiOauth.accessToken=$at | .claudeAiOauth.refreshToken=$rt | .claudeAiOauth.expiresAt=$ea' \
+           "$CREDS" > "$tmp" && mv "$tmp" "$CREDS"
+    else
+        # Quick attempt failed (likely boot, network not ready)
+        # Retry in background so we can show a loading state now
+        _do_refresh_and_fetch &>/dev/null &
+        auth_ok=false
+        syncing=true
+    fi
+fi
+
+# --- Fetch usage (with cache) ---
+mkdir -p "$CACHE_DIR"
+cache_file="$CACHE_DIR/usage.json"
+stale_marker="$CACHE_DIR/.stale"
+
+use_cache=false
+if [[ -f "$cache_file" ]]; then
+    cache_age=$(( $(date +%s) - $(date -r "$cache_file" +%s) ))
+    (( cache_age < CACHE_TTL )) && use_cache=true
+fi
+
+if [[ "$use_cache" == "true" ]]; then
+    usage=$(<"$cache_file")
+elif [[ "$auth_ok" == "false" ]]; then
+    # Auth failed — show loading if syncing in background, or fall back to stale cache
+    if [[ -f "$cache_file" ]]; then
+        stale_age=$(( $(date +%s) - $(date -r "$cache_file" +%s) ))
+        if (( stale_age > SESSION_WINDOW )); then
+            rm -f "$cache_file" "$stale_marker"
+            if [[ "$syncing" == "true" ]]; then
+                jq -nc '{text:"󰚩 ↻", tooltip:"Syncing with Claude...", class:"low"}'
+                exit 0
+            fi
+            die "Session expired.\nRun <b>claude</b> to re-login."
+        fi
+        usage=$(<"$cache_file")
+        # Notify once per failure (avoid spamming) — skip if syncing
+        if [[ "$syncing" != "true" ]] && [[ ! -f "$stale_marker" ]]; then
+            touch "$stale_marker"
+            command -v notify-send &>/dev/null && \
+                notify-send -u normal -i dialog-warning \
+                    "Claude Usage" "Session expired. Run <b>claude</b> to re-login." 2>/dev/null || true
+        fi
+    else
+        if [[ "$syncing" == "true" ]]; then
+            jq -nc '{text:"󰚩 ↻", tooltip:"Syncing with Claude...", class:"low"}'
+            exit 0
+        fi
+        die "Session expired.\nRun <b>claude</b> to re-login."
+    fi
+else
+    usage=$(curl -sf --max-time 10 "$API_URL" \
+        -H "Authorization: Bearer $access_token" \
+        -H "anthropic-beta: oauth-2025-04-20") || true
+
+    if [[ -n "$usage" ]] && jq -e '.five_hour' <<< "$usage" &>/dev/null; then
+        _ctmp=$(mktemp "$CACHE_DIR/.usage.XXXXXX")
+        printf '%s' "$usage" > "$_ctmp" && mv "$_ctmp" "$cache_file"
+        rm -f "$stale_marker"
+    elif [[ -f "$cache_file" ]]; then
+        # API failed — fall back to stale cache
+        usage=$(<"$cache_file")
+        touch "$stale_marker"
+    else
+        die "API request failed.\nCheck your connection."
+    fi
+fi
+
+# --- Parse windows ---
+parse_pct() {
+    local val
+    val=$(jq -r ".$1.utilization // 0" <<< "$usage")
+    printf '%.0f' "$val"
+}
+
+parse_reset() {
+    jq -r ".$1.resets_at // empty" <<< "$usage"
+}
+
+session_pct=$(parse_pct five_hour)
+session_reset=$(parse_reset five_hour)
+weekly_pct=$(parse_pct seven_day)
+weekly_reset=$(parse_reset seven_day)
+
+has_sonnet=$(jq '.seven_day_sonnet != null' <<< "$usage")
+sonnet_pct=0
+sonnet_reset=""
+if [[ "$has_sonnet" == "true" ]]; then
+    sonnet_pct=$(parse_pct seven_day_sonnet)
+    sonnet_reset=$(parse_reset seven_day_sonnet)
+fi
+
+# --- Extra usage ---
+has_extra=$(jq '.extra_usage != null' <<< "$usage")
+extra_enabled="false"
+extra_spent=""
+extra_limit=""
+extra_balance=""
+extra_pct=0
+if [[ "$has_extra" == "true" ]]; then
+    extra_enabled=$(jq -r '.extra_usage.is_enabled // false' <<< "$usage")
+    if [[ "$extra_enabled" == "true" ]]; then
+        local_limit=$(jq -r '(.extra_usage.monthly_limit // 0) | floor' <<< "$usage")
+        local_used=$(jq -r '(.extra_usage.used_credits // 0) | floor' <<< "$usage")
+        # Convert cents to dollars (integer math: 5000 → "50.00")
+        # Use absolute values for formatting to avoid "$-1.-50" with negative remainders
+        _fmt_dollars() {
+            local cents=$1 sign="" abs
+            (( cents < 0 )) && sign="-" && cents=$(( -cents ))
+            abs=$cents
+            printf '%s$%d.%02d' "$sign" $(( abs / 100 )) $(( abs % 100 ))
+        }
+        extra_limit=$(_fmt_dollars "$local_limit")
+        extra_spent=$(_fmt_dollars "$local_used")
+        local_balance=$(( local_limit - local_used ))
+        extra_balance=$(_fmt_dollars "$local_balance")
+        if (( local_limit > 0 )); then
+            extra_pct=$(( local_used * 100 / local_limit ))
+        fi
+    fi
+fi
+
+# --- Plan label ---
+plan="${sub_type^}"
+if   [[ "$rate_tier" == *"5x"* ]];  then plan+=" 5x"
+elif [[ "$rate_tier" == *"20x"* ]]; then plan+=" 20x"
+fi
+
+# --- Pacing ---
+_s_pace=$(calc_pacing "$session_pct" "$session_reset" "$SESSION_WINDOW")
+read -r session_elapsed session_pace _discard <<< "$_s_pace"
+session_pace_pct=$(cut -d' ' -f3- <<< "$_s_pace")
+
+_w_pace=$(calc_pacing "$weekly_pct" "$weekly_reset" "$WEEKLY_WINDOW")
+read -r weekly_elapsed weekly_pace _discard <<< "$_w_pace"
+weekly_pace_pct=$(cut -d' ' -f3- <<< "$_w_pace")
+
+# --- Waybar class (granular: low, mid, high, critical) ---
+max_pct=$session_pct
+(( weekly_pct > max_pct )) && max_pct=$weekly_pct
+(( sonnet_pct > max_pct )) && max_pct=$sonnet_pct
+(( extra_pct > max_pct )) && max_pct=$extra_pct
+
+class=""
+if   (( max_pct >= 90 )); then class="critical"
+elif (( max_pct >= 75 )); then class="high"
+elif (( max_pct >= 50 )); then class="mid"
+else class="low"
+fi
+
+# --- Apply format placeholders ---
+apply_format() {
+    local text="$1"
+    text="${text//\{icon\}/󰚩}"
+    text="${text//\{plan\}/$plan}"
+    text="${text//\{session_pct\}/$session_pct}"
+    text="${text//\{session_reset\}/$s_cd_val}"
+    text="${text//\{session_elapsed\}/$session_elapsed}"
+    text="${text//\{session_pace\}/$session_pace}"
+    text="${text//\{session_pace_pct\}/$session_pace_pct}"
+    text="${text//\{weekly_pct\}/$weekly_pct}"
+    text="${text//\{weekly_reset\}/$w_cd_val}"
+    text="${text//\{weekly_elapsed\}/$weekly_elapsed}"
+    text="${text//\{weekly_pace\}/$weekly_pace}"
+    text="${text//\{weekly_pace_pct\}/$weekly_pace_pct}"
+    text="${text//\{sonnet_pct\}/$sonnet_pct}"
+    text="${text//\{sonnet_reset\}/$sn_cd_val}"
+    text="${text//\{extra_spent\}/$extra_spent}"
+    text="${text//\{extra_limit\}/$extra_limit}"
+    text="${text//\{extra_balance\}/$extra_balance}"
+    text="${text//\{extra_pct\}/$extra_pct}"
+    printf '%s' "$text"
+}
+
+# Compute countdowns once
+s_cd_val=$(countdown "$session_reset")
+w_cd_val=$(countdown "$weekly_reset")
+sn_cd_val=""
+[[ "$has_sonnet" == "true" ]] && sn_cd_val=$(countdown "$sonnet_reset")
+
+# Add sync/stale indicator
+stale_icon=""
+if [[ "$syncing" == "true" ]]; then
+    stale_icon=" ↻"
+elif [[ -f "$stale_marker" ]]; then
+    stale_icon=" ⏸"
+fi
+
+bar_text=$(apply_format "$FORMAT")${stale_icon}
+
+# --- Tooltip ---
+if [[ -n "$TOOLTIP_FORMAT" ]]; then
+    # Custom tooltip via --tooltip-format
+    t=$(apply_format "$TOOLTIP_FORMAT")
+else
+    # Default rich Pango tooltip
+    s_color=$(color_for "$session_pct")
+    w_color=$(color_for "$weekly_pct")
+    s_bar=$(make_bar "$session_pct" "$s_color")
+    w_bar=$(make_bar "$weekly_pct" "$w_color")
+    s_cd="$s_cd_val"
+    w_cd="$w_cd_val"
+
+    NL=$'\n'
+    B="<span foreground='${BLUE}'>"
+    E="</span>"
+
+    strip_tags() { sed 's/<[^>]*>//g' <<< "$1"; }
+
+    # Collect all content lines into an array
+    lines=()
+    lines+=("CENTER<span font_weight='bold' foreground='${BLUE}'>Claude ${plan}</span>")
+    lines+=("SEP")
+    lines+=("")
+    lines+=(" <span foreground='${FG}'>  󰔟  Session</span>            <span font_weight='bold' foreground='${s_color}'>${session_pct}%</span>")
+    lines+=("   ${s_bar}")
+    lines+=(" <span foreground='${DIM}'>  ⏱  Resets in ${s_cd}</span>")
+    lines+=("")
+    lines+=(" <span foreground='${FG}'>  󰃰  Weekly</span>             <span font_weight='bold' foreground='${w_color}'>${weekly_pct}%</span>")
+    lines+=("   ${w_bar}")
+    lines+=(" <span foreground='${DIM}'>  ⏱  Resets in ${w_cd}</span>")
+
+    if [[ "$has_sonnet" == "true" ]]; then
+        sn_color=$(color_for "$sonnet_pct")
+        sn_bar=$(make_bar "$sonnet_pct" "$sn_color")
+        sn_cd=$(countdown "$sonnet_reset")
+        lines+=("")
+        lines+=(" <span foreground='${FG}'>  󱤔  Sonnet only</span>        <span font_weight='bold' foreground='${sn_color}'>${sonnet_pct}%</span>")
+        lines+=("   ${sn_bar}")
+        lines+=(" <span foreground='${DIM}'>  ⏱  Resets in ${sn_cd}</span>")
+    fi
+
+    if [[ "$extra_enabled" == "true" ]]; then
+        ex_color=$(color_for "$extra_pct")
+        ex_bar=$(make_bar "$extra_pct" "$ex_color")
+        lines+=("")
+        lines+=("SEP")
+        lines+=(" <span foreground='${FG}'>  󰄑  Extra usage</span>     <span font_weight='bold' foreground='${ex_color}'>${extra_spent}</span>")
+        lines+=("   ${ex_bar}")
+        lines+=(" <span foreground='${DIM}'>  󰀓  Limit: ${extra_limit}</span>")
+        lines+=(" <span foreground='${DIM}'>  󰏗  Balance: ${extra_balance}</span>")
+    fi
+
+    # Calculate max width from content
+    max_w=0
+    for line in "${lines[@]}"; do
+        [[ "$line" == "SEP" ]] && continue
+        [[ "$line" == CENTER* ]] && line="${line#CENTER}"
+        plain=$(strip_tags "$line")
+        (( ${#plain} > max_w )) && max_w=${#plain}
+    done
+    INNER_W=$(( max_w + 1 ))
+
+    pad() {
+        local content="$1"
+        local plain=$(strip_tags "$content")
+        local len=${#plain}
+        local need=$(( INNER_W - len ))
+        (( need < 0 )) && need=0
+        local sp=""
+        printf -v sp '%*s' "$need" ''
+        printf '%s%s' "$content" "$sp"
+    }
+
+    center_pad() {
+        local content="$1"
+        local plain=$(strip_tags "$content")
+        local len=${#plain}
+        local total=$(( INNER_W - len ))
+        (( total < 0 )) && total=0
+        local lp=$(( total / 2 )) rp=$(( total - total / 2 ))
+        local ls="" rs=""
+        printf -v ls '%*s' "$lp" ''
+        printf -v rs '%*s' "$rp" ''
+        printf '%s%s%s' "$ls" "$content" "$rs"
+    }
+
+    L() { printf '%s' "${B}│${E}$(pad "$1")${B}│${E}"; }
+    LC() { printf '%s' "${B}│${E}$(center_pad "$1")${B}│${E}"; }
+
+    # Build separator dynamically
+    sep=""
+    printf -v sep '%*s' "$(( INNER_W - 2 ))" ''; sep="${sep// /─}"
+    sep=" <span foreground='${DIM}'>${sep}</span>"
+
+    border_h=""
+    printf -v border_h '%*s' "$INNER_W" ''; border_h="${border_h// /─}"
+
+    # Render tooltip
+    t=""
+    t+="${B}╭${border_h}╮${E}${NL}"
+    for line in "${lines[@]}"; do
+        if [[ "$line" == "SEP" ]]; then
+            t+="$(L "$sep")${NL}"
+        elif [[ "$line" == CENTER* ]]; then
+            t+="$(LC "${line#CENTER}")${NL}"
+        else
+            t+="$(L "$line")${NL}"
+        fi
+    done
+    t+="${B}╰${border_h}╯${E}"
+fi
+
+# --- Output waybar JSON ---
+jq -nc --arg text "$bar_text" --arg tooltip "$t" --arg class "$class" \
+    '{text:$text, tooltip:$tooltip, class:$class}'
