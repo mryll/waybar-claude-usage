@@ -40,6 +40,17 @@
 #   {sonnet_pace_pts}        Sonnet pacing deviation, points (e.g. "8pts ahead")
 #   {sonnet_pace_delta}      Sonnet pacing delta, signed (e.g. "-8", "3", "0")
 #   {sonnet_pace_abs_delta}  Sonnet pacing delta, unsigned (e.g. "8", "3", "0")
+#   {model_name}        Model-scoped weekly limit model name (e.g. "Fable")
+#   {model_pct}         Model-scoped weekly usage %
+#   {model_reset}       Model countdown
+#   {model_elapsed}     Model time elapsed % (e.g. "42")
+#   {model_bar}         Model usage progress bar (Pango-colored)
+#   {model_pace}             Model pacing icon, ratio-based (↑ ↓ →)
+#   {model_pace_indicator}   Model pacing icon, point-based (↑ ↓ →)
+#   {model_pace_pct}         Model pacing deviation, ratio (e.g. "72% ahead")
+#   {model_pace_pts}         Model pacing deviation, points (e.g. "8pts ahead")
+#   {model_pace_delta}       Model pacing delta, signed (e.g. "-8", "3", "0")
+#   {model_pace_abs_delta}   Model pacing delta, unsigned (e.g. "8", "3", "0")
 #   {extra_spent}       Extra usage spent (e.g. "$2.50")
 #   {extra_limit}       Extra usage monthly limit (e.g. "$50.00")
 #   {extra_pct}         Extra usage spent %
@@ -52,6 +63,8 @@
 #   {weekly_remaining_bar}    Weekly remaining drain bar
 #   {sonnet_remaining_pct}    Sonnet remaining %
 #   {sonnet_remaining_bar}    Sonnet remaining drain bar
+#   {model_remaining_pct}     Model-scoped remaining %
+#   {model_remaining_bar}     Model-scoped remaining drain bar
 #
 # Default format: "{session_pct}% · {session_reset}"
 # --remaining flips the default bar text + tooltip to a "what's left" framing
@@ -649,9 +662,37 @@ if [[ "$has_sonnet" == "true" ]]; then
     sonnet_reset=$(parse_reset seven_day_sonnet)
 fi
 
+# --- Model-scoped weekly limit (e.g. Fable) ---
+# Newer payloads report per-model weekly limits through the limits[] array
+# (kind "weekly_scoped" with a scope.model) instead of a dedicated
+# seven_day_<model> field. Take the first well-formed model-scoped entry;
+# when seven_day_sonnet is already rendered, a scoped Sonnet entry is a
+# duplicate window, so skip it here (a later entry, e.g. Fable, still wins).
+model_limit=$(jq -c --argjson skip_sonnet "$has_sonnet" 'try (((.limits? | arrays) // []) | map(select(
+    type == "object" and .kind == "weekly_scoped"
+    and ((.scope? | type) == "object")
+    and ((.scope.model | type) == "object")
+    and (($skip_sonnet and (.scope.model.display_name == "Sonnet")) | not)
+)) | (first // empty)) catch empty' <<< "$usage") || model_limit=""
+has_model=false
+model_name=""
+model_name_esc=""
+model_pct=0
+model_reset=""
+if [[ -n "$model_limit" ]]; then
+    model_name=$(jq -r 'try ((.scope.model.display_name | strings) // "Model") catch "Model"' <<< "$model_limit")
+    model_name="${model_name//[[:cntrl:]]/ }"
+    [[ -z "${model_name// /}" ]] && model_name="Model"
+    model_name_esc=$(sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g' <<< "$model_name")
+    model_pct=$(jq -r 'try (((.percent | numbers) // 0) | round | if (. > 1e12 or . < 0) then 0 else . end) catch 0' <<< "$model_limit")
+    model_reset=$(jq -r 'try (.resets_at // empty) catch empty' <<< "$model_limit")
+    has_model=true
+fi
+
 session_remaining_pct=$(remaining_pct_for "$session_pct")
 weekly_remaining_pct=$(remaining_pct_for "$weekly_pct")
 sonnet_remaining_pct=$(remaining_pct_for "$sonnet_pct")
+model_remaining_pct=$(remaining_pct_for "$model_pct")
 
 # --- Extra usage ---
 has_extra=$(jq 'try (.extra_usage != null) catch false' <<< "$usage")
@@ -706,15 +747,25 @@ if [[ "$has_sonnet" == "true" ]]; then
     sonnet_pace_pts=$(cut -d' ' -f7-8 <<< "$_n_pace")
 fi
 
+model_elapsed=0 model_pace="" model_pace_indicator="" model_pace_pct="" model_pace_pts="" model_pace_delta="0"
+if [[ "$has_model" == "true" ]]; then
+    _m_pace=$(calc_pacing "$model_pct" "$model_reset" "$WEEKLY_WINDOW")
+    read -r model_elapsed model_pace model_pace_indicator model_pace_delta _discard <<< "$_m_pace"
+    model_pace_pct=$(cut -d' ' -f5-6 <<< "$_m_pace")
+    model_pace_pts=$(cut -d' ' -f7-8 <<< "$_m_pace")
+fi
+
 # --- Tooltip pace icon (ratio or point-based) ---
 if [[ "$TOOLTIP_PACE_PTS" == "true" ]]; then
     _tip_session_pace="$session_pace_indicator"
     _tip_weekly_pace="$weekly_pace_indicator"
     _tip_sonnet_pace="$sonnet_pace_indicator"
+    _tip_model_pace="$model_pace_indicator"
 else
     _tip_session_pace="$session_pace"
     _tip_weekly_pace="$weekly_pace"
     _tip_sonnet_pace="$sonnet_pace"
+    _tip_model_pace="$model_pace"
 fi
 
 # --- Pace colors ---
@@ -741,13 +792,15 @@ _precompute_pace() {
 _precompute_pace session "$session_pace" "$session_pace_indicator" "$session_pace_pct" "$session_pace_pts" "$session_pace_delta"
 _precompute_pace weekly  "$weekly_pace"  "$weekly_pace_indicator"  "$weekly_pace_pct"  "$weekly_pace_pts"  "$weekly_pace_delta"
 _precompute_pace sonnet  "$sonnet_pace"  "$sonnet_pace_indicator"  "$sonnet_pace_pct"  "$sonnet_pace_pts"  "$sonnet_pace_delta"
+_precompute_pace model   "$model_pace"   "$model_pace_indicator"   "$model_pace_pct"   "$model_pace_pts"   "$model_pace_delta"
 
 # --- Waybar class (granular: low, mid, high, critical) ---
 # Rate limits first; extra usage only matters when a rate limit hits 100%
 max_pct=$session_pct
 (( weekly_pct > max_pct )) && max_pct=$weekly_pct
 (( sonnet_pct > max_pct )) && max_pct=$sonnet_pct
-if (( session_pct >= 100 || weekly_pct >= 100 || sonnet_pct >= 100 )); then
+(( model_pct > max_pct )) && max_pct=$model_pct
+if (( session_pct >= 100 || weekly_pct >= 100 || sonnet_pct >= 100 || model_pct >= 100 )); then
     (( extra_pct > max_pct )) && max_pct=$extra_pct
 fi
 
@@ -777,16 +830,25 @@ apply_format() {
     text="${text//\{sonnet_remaining_pct\}/$sonnet_remaining_pct}"
     text="${text//\{sonnet_reset\}/$sn_cd_val}"
     text="${text//\{sonnet_elapsed\}/$sonnet_elapsed}"
+    # Quoted replacement: & in the escaped name must stay literal under
+    # bash 5.2's patsub_replacement (unquoted & expands to the match).
+    text="${text//\{model_name\}/"$model_name_esc"}"
+    text="${text//\{model_pct\}/$model_pct}"
+    text="${text//\{model_reset\}/$m_cd_val}"
+    text="${text//\{model_elapsed\}/$model_elapsed}"
+    text="${text//\{model_remaining_pct\}/$model_remaining_pct}"
     text="${text//\{extra_spent\}/$extra_spent}"
     text="${text//\{extra_limit\}/$extra_limit}"
     text="${text//\{extra_pct\}/$extra_pct}"
     text="${text//\{session_bar\}/$format_session_bar}"
     text="${text//\{weekly_bar\}/$format_weekly_bar}"
     text="${text//\{sonnet_bar\}/$format_sonnet_bar}"
+    text="${text//\{model_bar\}/$format_model_bar}"
     text="${text//\{extra_bar\}/$format_extra_bar}"
     text="${text//\{session_remaining_bar\}/$format_session_remaining_bar}"
     text="${text//\{weekly_remaining_bar\}/$format_weekly_remaining_bar}"
     text="${text//\{sonnet_remaining_bar\}/$format_sonnet_remaining_bar}"
+    text="${text//\{model_remaining_bar\}/$format_model_remaining_bar}"
 
     # Pace placeholders — pre-computed colored or plain depending on --format-pace-color.
     text="${text//\{session_pace_indicator\}/$_sp_session_indicator}"
@@ -807,6 +869,12 @@ apply_format() {
     text="${text//\{sonnet_pace_pct\}/$_sp_sonnet_pct}"
     text="${text//\{sonnet_pace_pts\}/$_sp_sonnet_pts}"
     text="${text//\{sonnet_pace\}/$_sp_sonnet_pace}"
+    text="${text//\{model_pace_indicator\}/$_sp_model_indicator}"
+    text="${text//\{model_pace_abs_delta\}/$_sp_model_abs_delta}"
+    text="${text//\{model_pace_delta\}/$_sp_model_delta}"
+    text="${text//\{model_pace_pct\}/$_sp_model_pct}"
+    text="${text//\{model_pace_pts\}/$_sp_model_pts}"
+    text="${text//\{model_pace\}/$_sp_model_pace}"
 
     printf '%s' "$text"
 }
@@ -816,20 +884,25 @@ s_cd_val=$(countdown "$session_reset")
 w_cd_val=$(countdown "$weekly_reset")
 sn_cd_val=""
 [[ "$has_sonnet" == "true" ]] && sn_cd_val=$(countdown "$sonnet_reset")
+m_cd_val=""
+[[ "$has_model" == "true" ]] && m_cd_val=$(countdown "$model_reset")
 
 # Per-window colors and bars used by --format / --tooltip-format placeholders.
 # Each bar is colored by its own window's usage, independent of the bar text wrapper.
 session_color=$(color_for "$session_pct")
 weekly_color=$(color_for "$weekly_pct")
 sonnet_color=$(color_for "$sonnet_pct")
+model_color=$(color_for "$model_pct")
 extra_color=$(color_for "$extra_pct")
 format_session_bar=$(make_bar "$session_pct" "$session_color")
 format_weekly_bar=$(make_bar "$weekly_pct" "$weekly_color")
 format_sonnet_bar=$(make_bar "$sonnet_pct" "$sonnet_color")
+format_model_bar=$(make_bar "$model_pct" "$model_color")
 format_extra_bar=$(make_bar "$extra_pct" "$extra_color")
 format_session_remaining_bar=$(make_bar "$session_remaining_pct" "$session_color")
 format_weekly_remaining_bar=$(make_bar "$weekly_remaining_pct" "$weekly_color")
 format_sonnet_remaining_bar=$(make_bar "$sonnet_remaining_pct" "$sonnet_color")
+format_model_remaining_bar=$(make_bar "$model_remaining_pct" "$model_color")
 
 # Stale data indicator
 stale_icon=""
@@ -915,6 +988,15 @@ else
         _lbl_n="$(display_pct "$sonnet_pct")% ${_tip_sonnet_pace}"
         lines+=("   ${tip_sonnet_bar}  $(_val_pad "$_lbl_n")<span font_weight='bold' foreground='${sonnet_color}'>${_lbl_n}</span>")
         lines+=(" <span foreground='${DIM}'>  󰥔  Resets in ${sn_cd}</span>")
+    fi
+
+    if [[ "$has_model" == "true" ]]; then
+        tip_model_bar=$(display_bar "$model_pct" "$model_elapsed" "$TOOLTIP_PACE_PTS")
+        lines+=("")
+        lines+=(" <span foreground='${FG}'>  󱤔  ${model_name_esc} only</span>")
+        _lbl_m="$(display_pct "$model_pct")% ${_tip_model_pace}"
+        lines+=("   ${tip_model_bar}  $(_val_pad "$_lbl_m")<span font_weight='bold' foreground='${model_color}'>${_lbl_m}</span>")
+        lines+=(" <span foreground='${DIM}'>  󰥔  Resets in ${m_cd_val}</span>")
     fi
 
     if [[ "$extra_enabled" == "true" ]]; then

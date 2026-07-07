@@ -17,7 +17,7 @@ Waybar widget that shows your Claude AI usage limits — session, weekly, and pe
 ## Features
 
 - Session (5h) and weekly (7d) usage with countdown timers
-- Per-model tracking (Sonnet) when available
+- Per-model tracking (Sonnet legacy field, plus model-scoped weekly limits like Fable) when available
 - Extra usage tracking (spending, limit, balance) when enabled
 - Pacing indicators — ratio-based and point-based, with optional per-window coloring
 - Tooltip elapsed markers — visual pacing reference in progress bars
@@ -246,13 +246,26 @@ Example Waybar config with custom format:
 | `{sonnet_pace_pts}` | Sonnet pacing deviation (points) | 3pts ahead |
 | `{sonnet_pace_delta}` | Sonnet pacing delta (signed) | 3 |
 | `{sonnet_pace_abs_delta}` | Sonnet pacing delta (unsigned) | 3 |
+| `{model_name}` | Model-scoped limit model name | Fable |
+| `{model_pct}` | Model-scoped weekly usage % | 67 |
+| `{model_remaining_pct}` | Model remaining % (100 − used) | 33 |
+| `{model_reset}` | Model countdown | 1d 19h |
+| `{model_elapsed}` | Model time elapsed % | 42 |
+| `{model_bar}` | Model usage progress bar (Pango) | `█████████████░░░░░░░` |
+| `{model_remaining_bar}` | Model remaining drain bar (Pango) | `██████░░░░░░░░░░░░░░` |
+| `{model_pace}` | Model pacing icon (ratio-based) | ↑ / ↓ / → |
+| `{model_pace_indicator}` | Model pacing icon (point-based) | ↑ / ↓ / → |
+| `{model_pace_pct}` | Model pacing deviation (ratio) | 3% ahead |
+| `{model_pace_pts}` | Model pacing deviation (points) | 3pts ahead |
+| `{model_pace_delta}` | Model pacing delta (signed) | 3 |
+| `{model_pace_abs_delta}` | Model pacing delta (unsigned) | 3 |
 | `{extra_spent}` | Extra usage spent | $2.50 |
 | `{extra_limit}` | Extra usage monthly limit | $50.00 |
 | `{extra_pct}` | Extra usage spent % | 5 |
 | `{extra_bar}` | Extra usage progress bar (Pango) | `█░░░░░░░░░░░░░░░░░░░` |
 
 > [!NOTE]
-> Bar placeholders are colored by their own window's usage thresholds (low/mid/high/critical), independently of the surrounding bar text color, which reflects the worst window overall. A `{session_bar}` can render green while the surrounding text is red because weekly or sonnet hit the critical threshold.
+> Bar placeholders are colored by their own window's usage thresholds (low/mid/high/critical), independently of the surrounding bar text color, which reflects the worst window overall. A `{session_bar}` can render green while the surrounding text is red because weekly, sonnet, or a model-scoped limit hit the critical threshold.
 
 ### Remaining mode
 
@@ -314,7 +327,7 @@ In addition to ratio-based pacing, there's a point-based alternative that comput
 | `{*_pace_delta}` | Points | -12 | Signed integer delta |
 | `{*_pace_abs_delta}` | Points | 12 | Unsigned integer delta |
 
-Replace `*` with `session`, `weekly`, or `sonnet`.
+Replace `*` with `session`, `weekly`, `sonnet`, or `model`.
 
 ### Per-window pace coloring
 
@@ -384,7 +397,7 @@ Adjust `padding` (inside the widget) and `margin` (outside the widget) in `~/.co
 3. Calls `api.anthropic.com/api/oauth/usage` for live usage data (cached for 60s)
 4. Outputs JSON with `text`, `tooltip` (Pango markup), and `class` for Waybar
 
-The tooltip shows colored progress bars for each usage window (session, weekly, sonnet) with countdown timers, time elapsed, and pacing info. Colors change from green → yellow → orange → red as usage increases.
+The tooltip shows colored progress bars for each usage window (session, weekly, per-model when reported) with countdown timers, time elapsed, and pacing info. Colors change from green → yellow → orange → red as usage increases.
 
 ### Cache
 
