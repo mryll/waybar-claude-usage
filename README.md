@@ -246,7 +246,7 @@ Example Waybar config with custom format:
 | `{sonnet_pace_pts}` | Sonnet pacing deviation (points) | 3pts ahead |
 | `{sonnet_pace_delta}` | Sonnet pacing delta (signed) | 3 |
 | `{sonnet_pace_abs_delta}` | Sonnet pacing delta (unsigned) | 3 |
-| `{model_name}` | Model-scoped limit model name | Fable |
+| `{model_name}` | Model-scoped limit model name¹ | Fable |
 | `{model_pct}` | Model-scoped weekly usage % | 67 |
 | `{model_remaining_pct}` | Model remaining % (100 − used) | 33 |
 | `{model_reset}` | Model countdown | 1d 19h |
@@ -263,6 +263,9 @@ Example Waybar config with custom format:
 | `{extra_limit}` | Extra usage monthly limit | $50.00 |
 | `{extra_pct}` | Extra usage spent % | 5 |
 | `{extra_bar}` | Extra usage progress bar (Pango) | `█░░░░░░░░░░░░░░░░░░░` |
+
+> [!NOTE]
+> ¹ When the API reports several model-scoped limits, the tooltip shows one section per model; `{model_*}` placeholders refer to the first.
 
 > [!NOTE]
 > Bar placeholders are colored by their own window's usage thresholds (low/mid/high/critical), independently of the surrounding bar text color, which reflects the worst window overall. A `{session_bar}` can render green while the surrounding text is red because weekly, sonnet, or a model-scoped limit hit the critical threshold.

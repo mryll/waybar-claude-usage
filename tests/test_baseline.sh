@@ -33,5 +33,18 @@ for fx_name in MIN SON EXTRA BAD; do
     cmp_same "baseline $fx_name custom --tooltip-format" "$fx" --tooltip-format '{session_bar} {weekly_bar}'
 done
 
+# --- v0.7.0 baseline: zero- and one-model limits[] payloads must render
+# byte-identically to the first model-scoped release (BASE_REF predates limits[]).
+MODEL_BASE_REF="${MODEL_BASE_REF:-08aedef}"   # v0.7.0 — model-scoped weekly limits
+git -C "$REPO" show "$MODEL_BASE_REF:claudebar" > "$base" || { echo "FATAL: cannot extract $MODEL_BASE_REF:claudebar" >&2; rm -f "$base"; exit 1; }
+FAB='{"five_hour":{"utilization":42,"resets_at":"2030-01-01T00:00:00+00:00"},"seven_day":{"utilization":27,"resets_at":"2030-01-01T00:00:00+00:00"},"limits":[{"kind":"weekly_scoped","percent":67,"resets_at":"2030-01-01T00:00:00+00:00","scope":{"model":{"display_name":"Fable"}}}]}'
+for fx_name in MIN FAB; do
+    fx="${!fx_name}"
+    cmp_same "baseline-0.7 $fx_name default"            "$fx"
+    cmp_same "baseline-0.7 $fx_name --tooltip-pace-pts" "$fx" --tooltip-pace-pts
+    cmp_same "baseline-0.7 $fx_name --remaining"        "$fx" --remaining
+    cmp_same "baseline-0.7 $fx_name custom --format"    "$fx" --format '{model_name} {model_pct}% {model_bar}'
+done
+
 rm -f "$base"
 finish

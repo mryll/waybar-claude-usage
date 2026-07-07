@@ -40,7 +40,9 @@
 #   {sonnet_pace_pts}        Sonnet pacing deviation, points (e.g. "8pts ahead")
 #   {sonnet_pace_delta}      Sonnet pacing delta, signed (e.g. "-8", "3", "0")
 #   {sonnet_pace_abs_delta}  Sonnet pacing delta, unsigned (e.g. "8", "3", "0")
-#   {model_name}        Model-scoped weekly limit model name (e.g. "Fable")
+#   {model_name}        Model-scoped weekly limit model name (e.g. "Fable").
+#                       With several model-scoped limits, {model_*} tracks the
+#                       first one; the tooltip shows one section per model.
 #   {model_pct}         Model-scoped weekly usage %
 #   {model_reset}       Model countdown
 #   {model_elapsed}     Model time elapsed % (e.g. "42")
@@ -662,30 +664,48 @@ if [[ "$has_sonnet" == "true" ]]; then
     sonnet_reset=$(parse_reset seven_day_sonnet)
 fi
 
-# --- Model-scoped weekly limit (e.g. Fable) ---
+# --- Model-scoped weekly limits (e.g. Fable) ---
 # Newer payloads report per-model weekly limits through the limits[] array
 # (kind "weekly_scoped" with a scope.model) instead of a dedicated
-# seven_day_<model> field. Take the first well-formed model-scoped entry;
-# when seven_day_sonnet is already rendered, a scoped Sonnet entry is a
-# duplicate window, so skip it here (a later entry, e.g. Fable, still wins).
-model_limit=$(jq -c --argjson skip_sonnet "$has_sonnet" 'try (((.limits? | arrays) // []) | map(select(
-    type == "object" and .kind == "weekly_scoped"
-    and ((.scope? | type) == "object")
-    and ((.scope.model | type) == "object")
-    and (($skip_sonnet and (.scope.model.display_name == "Sonnet")) | not)
-)) | (first // empty)) catch empty' <<< "$usage") || model_limit=""
+# seven_day_<model> field. Every well-formed entry (capped at 4 — hostile
+# payloads must not grow the tooltip or burn CPU each interval) gets its own
+# tooltip section and counts toward the Waybar class; {model_*} placeholders
+# track the FIRST entry. When seven_day_sonnet is already rendered, a scoped
+# Sonnet entry is a duplicate window, so skip it (later entries still win).
+# One jq pass emits name<TAB>pct<TAB>reset per entry: limit() stops early on
+# huge arrays; the name is control-stripped (kills tabs) then Pango-escaped
+# in jq, so plain join("\t") is delimiter-safe and byte-faithful.
+_model_rows=()
+readarray -t _model_rows < <(jq -r --argjson skip_sonnet "$has_sonnet" '
+    def esc: gsub("&"; "&amp;") | gsub("<"; "&lt;") | gsub(">"; "&gt;");
+    def clean: gsub("[[:cntrl:]]"; " ") | if gsub(" "; "") == "" then "Model" else . end;
+    try (limit(4; ((.limits? | arrays) // [])[]
+        | select(type == "object" and .kind == "weekly_scoped"
+            and ((.scope? | type) == "object")
+            and ((.scope.model | type) == "object")
+            and (($skip_sonnet and (.scope.model.display_name == "Sonnet")) | not))
+        | [ ((.scope.model.display_name | strings) // "Model" | clean | esc),
+            (((.percent | numbers) // 0) | round | if (. > 1e12 or . < 0) then 0 else . end | tostring),
+            ((.resets_at | strings) // "" | gsub("[[:cntrl:]]"; "")) ]
+        | join("\t"))) catch empty' <<< "$usage")
+
 has_model=false
-model_name=""
+model_names_esc=() model_pcts=() model_resets=()
+model_max_pct=0
+for _row in "${_model_rows[@]}"; do
+    IFS=$'\t' read -r _mn _mp _mr <<< "$_row"
+    model_names_esc+=("$_mn")
+    model_pcts+=("${_mp:-0}")
+    model_resets+=("${_mr:-}")
+    (( ${_mp:-0} > model_max_pct )) && model_max_pct=${_mp:-0}
+done
 model_name_esc=""
 model_pct=0
 model_reset=""
-if [[ -n "$model_limit" ]]; then
-    model_name=$(jq -r 'try ((.scope.model.display_name | strings) // "Model") catch "Model"' <<< "$model_limit")
-    model_name="${model_name//[[:cntrl:]]/ }"
-    [[ -z "${model_name// /}" ]] && model_name="Model"
-    model_name_esc=$(sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g' <<< "$model_name")
-    model_pct=$(jq -r 'try (((.percent | numbers) // 0) | round | if (. > 1e12 or . < 0) then 0 else . end) catch 0' <<< "$model_limit")
-    model_reset=$(jq -r 'try (.resets_at // empty) catch empty' <<< "$model_limit")
+if (( ${#model_pcts[@]} > 0 )); then
+    model_name_esc="${model_names_esc[0]}"
+    model_pct="${model_pcts[0]}"
+    model_reset="${model_resets[0]}"
     has_model=true
 fi
 
@@ -799,8 +819,8 @@ _precompute_pace model   "$model_pace"   "$model_pace_indicator"   "$model_pace_
 max_pct=$session_pct
 (( weekly_pct > max_pct )) && max_pct=$weekly_pct
 (( sonnet_pct > max_pct )) && max_pct=$sonnet_pct
-(( model_pct > max_pct )) && max_pct=$model_pct
-if (( session_pct >= 100 || weekly_pct >= 100 || sonnet_pct >= 100 || model_pct >= 100 )); then
+(( model_max_pct > max_pct )) && max_pct=$model_max_pct
+if (( session_pct >= 100 || weekly_pct >= 100 || sonnet_pct >= 100 || model_max_pct >= 100 )); then
     (( extra_pct > max_pct )) && max_pct=$extra_pct
 fi
 
@@ -990,14 +1010,29 @@ else
         lines+=(" <span foreground='${DIM}'>  󰥔  Resets in ${sn_cd}</span>")
     fi
 
-    if [[ "$has_model" == "true" ]]; then
-        tip_model_bar=$(display_bar "$model_pct" "$model_elapsed" "$TOOLTIP_PACE_PTS")
+    # One section per model-scoped limit. Index 0 reuses the cached pacing/
+    # countdown behind the {model_*} placeholders so tooltip and placeholders
+    # can never disagree within one run; later entries compute inline.
+    for _mi in "${!model_pcts[@]}"; do
+        _mp="${model_pcts[$_mi]}"
+        if (( _mi == 0 )); then
+            _melapsed=$model_elapsed _mtip_pace=$_tip_model_pace
+            _mcolor=$model_color _mcd=$m_cd_val
+        else
+            _mpace_out=$(calc_pacing "$_mp" "${model_resets[$_mi]}" "$WEEKLY_WINDOW")
+            read -r _melapsed _micon _mind _mdiscard <<< "$_mpace_out"
+            _mtip_pace="$_micon"
+            [[ "$TOOLTIP_PACE_PTS" == "true" ]] && _mtip_pace="$_mind"
+            _mcolor=$(color_for "$_mp")
+            _mcd=$(countdown "${model_resets[$_mi]}")
+        fi
+        _mbar=$(display_bar "$_mp" "$_melapsed" "$TOOLTIP_PACE_PTS")
         lines+=("")
-        lines+=(" <span foreground='${FG}'>  󱤔  ${model_name_esc} only</span>")
-        _lbl_m="$(display_pct "$model_pct")% ${_tip_model_pace}"
-        lines+=("   ${tip_model_bar}  $(_val_pad "$_lbl_m")<span font_weight='bold' foreground='${model_color}'>${_lbl_m}</span>")
-        lines+=(" <span foreground='${DIM}'>  󰥔  Resets in ${m_cd_val}</span>")
-    fi
+        lines+=(" <span foreground='${FG}'>  󱤔  ${model_names_esc[$_mi]} only</span>")
+        _lbl_m="$(display_pct "$_mp")% ${_mtip_pace}"
+        lines+=("   ${_mbar}  $(_val_pad "$_lbl_m")<span font_weight='bold' foreground='${_mcolor}'>${_lbl_m}</span>")
+        lines+=(" <span foreground='${DIM}'>  󰥔  Resets in ${_mcd}</span>")
+    done
 
     if [[ "$extra_enabled" == "true" ]]; then
         lines+=("")
