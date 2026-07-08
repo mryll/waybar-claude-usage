@@ -715,16 +715,23 @@ sonnet_remaining_pct=$(remaining_pct_for "$sonnet_pct")
 model_remaining_pct=$(remaining_pct_for "$model_pct")
 
 # --- Extra usage ---
+# Show whenever there is real spend data, not only when actively enabled: the API
+# reports is_enabled=false (disabled_reason "out_of_credits") once the balance is
+# depleted, but the spend ($used of $limit) is still present and is exactly what
+# the Claude usage page shows. Gating on is_enabled hid it in that state.
 has_extra=$(jq 'try (.extra_usage != null) catch false' <<< "$usage")
-extra_enabled="false"
+extra_show="false"
 extra_spent=""
 extra_limit=""
 extra_pct=0
 if [[ "$has_extra" == "true" ]]; then
-    extra_enabled=$(jq -r 'try (.extra_usage.is_enabled // false) catch false' <<< "$usage")
-    if [[ "$extra_enabled" == "true" ]]; then
-        local_limit=$(jq -r 'try (((.extra_usage.monthly_limit | numbers) // 0) | floor | if (. > 1e12 or . < 0) then 0 else . end) catch 0' <<< "$usage")
-        local_used=$(jq -r 'try (((.extra_usage.used_credits | numbers) // 0) | floor | if (. > 1e12 or . < 0) then 0 else . end) catch 0' <<< "$usage")
+    local_limit=$(jq -r 'try (((.extra_usage.monthly_limit | numbers) // 0) | floor | if (. > 1e12 or . < 0) then 0 else . end) catch 0' <<< "$usage")
+    local_used=$(jq -r 'try (((.extra_usage.used_credits | numbers) // 0) | floor | if (. > 1e12 or . < 0) then 0 else . end) catch 0' <<< "$usage")
+    # Only populate display values (and show the section) when there is real
+    # spend data — leaving the dollar placeholders empty for a zero/never-set
+    # extra_usage object, exactly as when this was gated on is_enabled.
+    if (( local_limit > 0 || local_used > 0 )); then
+        extra_show="true"
         # Convert cents to dollars (integer math: 5000 → "50.00")
         # Use absolute values for formatting to avoid "$-1.-50" with negative remainders
         _fmt_dollars() {
@@ -1034,7 +1041,7 @@ else
         lines+=(" <span foreground='${DIM}'>  󰥔  Resets in ${_mcd}</span>")
     done
 
-    if [[ "$extra_enabled" == "true" ]]; then
+    if [[ "$extra_show" == "true" ]]; then
         lines+=("")
         lines+=("SEP")
         lines+=(" <span foreground='${FG}'>  󰄑  Extra usage</span>")
