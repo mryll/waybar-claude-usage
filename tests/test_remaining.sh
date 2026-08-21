@@ -54,11 +54,11 @@ assert_tip_has "no-flag tooltip usage 40%" "40%"
 run_claudebar '{"five_hour":{"utilization":"oops"},"seven_day":{"utilization":null},"seven_day_sonnet":"nope"}' --remaining --tooltip-pace-pts
 assert_exit0 "--remaining malformed: exit 0"; assert_json_valid "--remaining malformed: valid JSON"
 
-# extra_usage is NEVER remaining-framed, even under --remaining (still "$X / Limit $Y")
+# extra_usage is NEVER remaining-framed, even under --remaining.
 EX='{"five_hour":{"utilization":40,"resets_at":"2030-01-01T00:00:00+00:00"},"seven_day":{"utilization":10,"resets_at":"2030-01-01T00:00:00+00:00"},"extra_usage":{"is_enabled":true,"used_credits":250,"monthly_limit":5000}}'
 run_claudebar "$EX" --remaining
 assert_exit0 "extra under --remaining: exit 0"; assert_json_valid "extra under --remaining: valid JSON"
-assert_tip_has "extra still shows dollar limit" "Limit:"
+assert_tip_has "extra still shows dollar limit" "Monthly limit:"
 
 # smoke test: --remaining with battery bars + marker renders without crashing (exit 0 + valid JSON)
 run_claudebar "$FIX" --remaining --tooltip-pace-pts

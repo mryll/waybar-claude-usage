@@ -6,6 +6,26 @@
 # Usage: claudebar [--icon ICON] [--format FORMAT] [--tooltip-format FORMAT] [--pace-tolerance N]
 #                  [--format-pace-color] [--tooltip-pace-pts] [--remaining]
 #                  [--color-low HEX] [--color-mid HEX] [--color-high HEX] [--color-critical HEX]
+#                  [--json] [--refresh]
+#
+# --json     Structured output mode: emits one raw-data JSON object (numbers,
+#            ISO-8601 timestamps, state strings — no Pango markup) instead of
+#            Waybar JSON. For frontends that render their own UI, e.g. the
+#            Omarchy shell plugin in omarchy/. Always exits 0; errors are
+#            reported in an "error" field. Carries the resolved gauge anchors
+#            in "palette" (theme colors / --color-* overrides) so such a
+#            frontend paints the same ramp this script does — the only colors
+#            in the payload, and data rather than markup.
+#            See README "Structured JSON output".
+# --refresh  Bypass the 60s response cache and fetch fresh data from the API
+#            (the result still updates the cache for other instances).
+# --no-color[=all|bar|tooltip]
+#            Monochrome output: no color markup on the chosen surface (default
+#            "all"). Everything structural stays — glyphs, bar characters,
+#            markers, box drawing, bold, layout. The "class" field and the
+#            --json payload are unaffected, so CSS remains the way to style a
+#            monochrome bar. NO_COLOR=<non-empty> in the environment means
+#            --no-color=all; an explicit flag wins over it.
 #
 # Format placeholders:
 #   {icon}              󰚩 icon (Nerd Font)
@@ -55,8 +75,8 @@
 #   {model_pace_abs_delta}   Model pacing delta, unsigned (e.g. "8", "3", "0")
 #   {extra_spent}       Extra usage spent (e.g. "$2.50")
 #   {extra_limit}       Extra usage monthly limit (e.g. "$50.00")
-#   {extra_pct}         Extra usage spent %
-#   {extra_bar}         Extra usage progress bar (Pango-colored)
+#   {extra_pct}         Usage-credit spend as % of real funded credits
+#   {extra_bar}         Real funded-credit progress bar (Pango-colored)
 #
 #   Remaining mode (battery framing; available regardless of --remaining):
 #   {session_remaining_pct}   Session remaining % (100 - used)
@@ -92,44 +112,131 @@ FORMAT_PACE_COLOR=false
 TOOLTIP_PACE_PTS=false
 FRAME=false
 FRAME_FONT="JetBrainsMono Nerd Font Mono"
+JSON_MODE=false
+FORCE_REFRESH=false
+NO_COLOR_SET=false
+NO_COLOR_WHAT=""
+
+# Pre-scan for --json BEFORE the parse loop so argument errors already know
+# which output schema to speak. Never reset afterwards.
+for _a in "$@"; do [[ "$_a" == "--json" ]] && JSON_MODE=true && break; done
+
+# Argument/usage error. Fires before dependencies are verified, so the JSON
+# path needs a jq-less fallback — a FIXED literal (no interpolation, no manual
+# escaper) that nothing in the message can break. With jq available the real
+# message goes through --arg, which handles quotes and control characters.
+# The Waybar shape reproduces the pre-existing inline output byte-for-byte.
+cli_error() {
+    if [[ "$JSON_MODE" == "true" ]]; then
+        if command -v jq &>/dev/null; then
+            jq -nc --arg m "$1" '{schema_version:1, error:{message:$m}}'
+        else
+            printf '{"schema_version":1,"error":{"message":"invalid arguments"}}\n'
+        fi
+    else
+        local _m="${1//\\/\\\\}"; _m="${_m//\"/\\\"}"
+        printf '{"text":"⚠","tooltip":"%s","class":"critical"}\n' "$_m"
+    fi
+    exit 0
+}
+
+# Accept the hex forms a color source may legitimately use: #rgb, #rgba,
+# #rrggbb, #rrggbbaa. Anything else (color names, gradients, junk) is rejected
+# so a malformed theme or pywal cache can never reach the blending math.
+is_hex_color() {
+    [[ "$1" =~ ^#([0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$ ]]
+}
+
+# Reduce any accepted hex form to #rrggbb: shorthand is expanded, alpha is
+# dropped (the widget composites on the bar's own background). Prints nothing
+# and returns 1 for values is_hex_color would reject, so callers can guard.
+normalize_hex() {
+    local h="${1#\#}"
+    case "${#h}" in
+        3|4) printf '#%s%s%s%s%s%s' "${h:0:1}" "${h:0:1}" "${h:1:1}" "${h:1:1}" "${h:2:1}" "${h:2:1}" ;;
+        6|8) printf '#%s' "${h:0:6}" ;;
+        *)   return 1 ;;
+    esac
+    return 0
+}
+
+# A --color-* value is interpolated into a single-quoted Pango attribute, so it
+# must not be able to close that quote or open a tag. Hex passes; so does a bare
+# Pango/X11 color name ("red", "tomato"), which the flag has always accepted.
+# Anything else is an argument error rather than injected markup.
+valid_color_spec() {
+    is_hex_color "$1" || [[ "$1" =~ ^[A-Za-z][A-Za-z0-9]*$ ]]
+}
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --icon)
-            [[ $# -ge 2 ]] || { echo '{"text":"⚠","tooltip":"--icon requires a value","class":"critical"}'; exit 0; }
+            [[ $# -ge 2 ]] || cli_error "--icon requires a value"
             BAR_ICON="$2"; shift 2 ;;
         --format)
-            [[ $# -ge 2 ]] || { echo '{"text":"⚠","tooltip":"--format requires a value","class":"critical"}'; exit 0; }
+            [[ $# -ge 2 ]] || cli_error "--format requires a value"
             FORMAT="$2"; FORMAT_SET=true; shift 2 ;;
         --tooltip-format)
-            [[ $# -ge 2 ]] || { echo '{"text":"⚠","tooltip":"--tooltip-format requires a value","class":"critical"}'; exit 0; }
+            [[ $# -ge 2 ]] || cli_error "--tooltip-format requires a value"
             TOOLTIP_FORMAT="$2"; shift 2 ;;
         --pace-tolerance)
-            [[ $# -ge 2 ]] || { echo '{"text":"⚠","tooltip":"--pace-tolerance requires a value","class":"critical"}'; exit 0; }
+            [[ $# -ge 2 ]] || cli_error "--pace-tolerance requires a value"
             PACE_TOLERANCE="$2"; shift 2 ;;
         --format-pace-color) FORMAT_PACE_COLOR=true; shift ;;
         --tooltip-pace-pts) TOOLTIP_PACE_PTS=true; shift ;;
         --remaining) REMAINING=true; shift ;;
+        --json) shift ;;  # already picked up by the pre-scan
+        --refresh) FORCE_REFRESH=true; shift ;;
+        --no-color) NO_COLOR_SET=true; NO_COLOR_WHAT="all"; shift ;;
+        --no-color=*)
+            NO_COLOR_SET=true; NO_COLOR_WHAT="${1#*=}"
+            case "$NO_COLOR_WHAT" in
+                all|bar|tooltip) ;;
+                *) cli_error "--no-color must be all, bar, or tooltip" ;;
+            esac
+            shift ;;
         --frame) FRAME=true; shift ;;
-        --frame-font) [[ $# -ge 2 ]] || { echo '{"text":"⚠","tooltip":"--frame-font requires a value","class":"critical"}'; exit 0; }
+        --frame-font) [[ $# -ge 2 ]] || cli_error "--frame-font requires a value"
                       FRAME_FONT="$2"; shift 2 ;;
-        --color-low)       [[ $# -ge 2 ]] || { echo '{"text":"⚠","tooltip":"--color-low requires a value","class":"critical"}'; exit 0; }
+        --color-low)       [[ $# -ge 2 ]] || cli_error "--color-low requires a value"
+                           valid_color_spec "$2" || cli_error "--color-low must be a hex color or a plain color name"
                            BAR_COLOR_LOW="$2"; shift 2 ;;
-        --color-mid)       [[ $# -ge 2 ]] || { echo '{"text":"⚠","tooltip":"--color-mid requires a value","class":"critical"}'; exit 0; }
+        --color-mid)       [[ $# -ge 2 ]] || cli_error "--color-mid requires a value"
+                           valid_color_spec "$2" || cli_error "--color-mid must be a hex color or a plain color name"
                            BAR_COLOR_MID="$2"; shift 2 ;;
-        --color-high)      [[ $# -ge 2 ]] || { echo '{"text":"⚠","tooltip":"--color-high requires a value","class":"critical"}'; exit 0; }
+        --color-high)      [[ $# -ge 2 ]] || cli_error "--color-high requires a value"
+                           valid_color_spec "$2" || cli_error "--color-high must be a hex color or a plain color name"
                            BAR_COLOR_HIGH="$2"; shift 2 ;;
-        --color-critical)  [[ $# -ge 2 ]] || { echo '{"text":"⚠","tooltip":"--color-critical requires a value","class":"critical"}'; exit 0; }
+        --color-critical)  [[ $# -ge 2 ]] || cli_error "--color-critical requires a value"
+                           valid_color_spec "$2" || cli_error "--color-critical must be a hex color or a plain color name"
                            BAR_COLOR_CRITICAL="$2"; shift 2 ;;
-        *) _o="${1//\\/\\\\}"; _o="${_o//\"/\\\"}"; echo '{"text":"⚠","tooltip":"Unknown option: '"$_o"'","class":"critical"}'; exit 0 ;;
+        *) cli_error "Unknown option: $1" ;;
     esac
 done
-[[ "$PACE_TOLERANCE" =~ ^[0-9]+$ ]] || { echo '{"text":"⚠","tooltip":"--pace-tolerance must be a non-negative integer","class":"critical"}'; exit 0; }
+[[ "$PACE_TOLERANCE" =~ ^[0-9]+$ ]] || cli_error "--pace-tolerance must be a non-negative integer"
+
+# Monochrome mode. NO_COLOR (https://no-color.org) means "all" when set to any
+# non-empty value; an explicit --no-color=... is the more specific instruction
+# and wins over it, so `NO_COLOR=1 claudebar --no-color=bar` still colors the
+# tooltip. Only presentation is affected: the Waybar `class` field and the
+# --json payload are machine contracts and stay exactly as they are.
+if [[ "$NO_COLOR_SET" != "true" && -n "${NO_COLOR:-}" ]]; then
+    NO_COLOR_WHAT="all"
+fi
+BAR_PLAIN=false
+TOOLTIP_PLAIN=false
+case "$NO_COLOR_WHAT" in
+    all)     BAR_PLAIN=true; TOOLTIP_PLAIN=true ;;
+    bar)     BAR_PLAIN=true ;;
+    tooltip) TOOLTIP_PLAIN=true ;;
+esac
 PACE_TOLERANCE=$((10#$PACE_TOLERANCE))
 # In remaining mode, default the bar to "what's left" unless the user set their own format.
 [[ "$REMAINING" == "true" && "$FORMAT_SET" == "false" ]] && FORMAT="{session_remaining_pct}% · {session_reset}"
 
 CREDS="$HOME/.claude/.credentials.json"
 API_URL="https://api.anthropic.com/api/oauth/usage"
+API_BASE_URL="https://api.anthropic.com"
 TOKEN_URL="https://platform.claude.com/v1/oauth/token"
 CLIENT_ID="9d1c250a-e61b-44d9-88ed-5944d1962f5e" # Claude CLI OAuth client ID
 REFRESH_BUFFER=300 # refresh 5 min before expiry
@@ -152,6 +259,7 @@ NET_BOOT_CACHE_AGE=600 # cache older than this → boot-like start
 NET_WAIT_RECENT=45     # .net_wait younger than this → a sibling already waited
 
 # --- Theme colors ---
+
 # Blend two hex colors (#RRGGBB) by averaging their RGB components
 hex_blend() {
     local c1="${1#\#}" c2="${2#\#}"
@@ -160,11 +268,74 @@ hex_blend() {
     printf '#%02x%02x%02x' $(( (r1+r2)/2 )) $(( (g1+g2)/2 )) $(( (b1+b2)/2 ))
 }
 
+# Linear interpolation between two #RRGGBB colors; t in integer thousandths
+# (0..1000). Integer math only, components stay within the endpoints.
+hex_lerp() {
+    local c1="${1#\#}" c2="${2#\#}" t=$3
+    local r1=$((16#${c1:0:2})) g1=$((16#${c1:2:2})) b1=$((16#${c1:4:2}))
+    local r2=$((16#${c2:0:2})) g2=$((16#${c2:2:2})) b2=$((16#${c2:4:2}))
+    printf '#%02x%02x%02x' \
+        $(( r1 + (r2 - r1) * t / 1000 )) \
+        $(( g1 + (g2 - g1) * t / 1000 )) \
+        $(( b1 + (b2 - b1) * t / 1000 ))
+}
+
+# Assign a validated, normalized color to a variable by name. Silently keeps
+# the variable's current value when the candidate isn't a usable hex color —
+# that is the "missing key keeps the built-in default" rule, applied uniformly
+# to every color source.
+set_color_var() {  # <var-name> <candidate>
+    local _norm
+    is_hex_color "${2:-}" || return 0
+    _norm=$(normalize_hex "$2") || return 0
+    printf -v "$1" '%s' "$_norm"
+    return 0
+}
+
+# Try each candidate in order and keep the first that is a usable color, so a
+# malformed value never suppresses a valid fallback behind it.
+set_color_var_first() {  # <var-name> <candidate>...
+    local var="$1"; shift
+    local c
+    for c in "$@"; do
+        [[ -n "$c" ]] || continue
+        is_hex_color "$c" || continue
+        set_color_var "$var" "$c"
+        return 0
+    done
+    return 0
+}
+
+# Which source painted the palette: "omarchy", "pywal", or "" for built-ins.
+# pywal is consulted only when no Omarchy theme was found; it never overrides
+# Omarchy, and neither overrides explicit --color-* flags (applied later).
+THEME_SOURCE=""
+
+# Locate the active Omarchy theme's colors.toml. Current Omarchy keeps the
+# `current/theme` symlink under $XDG_STATE_HOME (what the shell's Color.qml
+# reads); older layouts kept it under ~/.config. Try both, newest first, so
+# theming works on either without the user configuring anything.
+theme_colors_file() {
+    local p
+    for p in "${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/current/theme/colors.toml" \
+             "$HOME/.config/omarchy/current/theme/colors.toml"; do
+        [[ -f "$p" ]] && { printf '%s' "$p"; return 0; }
+    done
+    # No theme installed (plain Waybar user): print nothing, and exit 0 —
+    # a non-zero status here would abort the whole script under `set -e`.
+    return 0
+}
+
 load_theme_colors() {
-    local theme_file="$HOME/.config/omarchy/current/theme/colors.toml"
-    if [[ -f "$theme_file" ]]; then
-        local accent="" foreground="" background="" color1="" color2="" color3=""
-        while IFS= read -r line; do
+    local theme_file
+    theme_file=$(theme_colors_file)
+    if [[ -n "$theme_file" && -f "$theme_file" ]]; then
+        local accent="" foreground="" background=""
+        local color1="" color2="" color3=""
+        local t_red="" t_green="" t_yellow="" t_orange=""
+        # `|| [[ -n "$line" ]]` so a file whose last line has no trailing
+        # newline still contributes its final key.
+        while IFS= read -r line || [[ -n "$line" ]]; do
             # Skip comments and empty lines
             [[ "$line" =~ ^[[:space:]]*# ]] && continue
             [[ -z "${line// /}" ]] && continue
@@ -175,28 +346,101 @@ load_theme_colors() {
                     accent)     accent="$val" ;;
                     foreground) foreground="$val" ;;
                     background) background="$val" ;;
+                    # Named keys, as current Omarchy themes ship them.
+                    red)        t_red="$val" ;;
+                    green)      t_green="$val" ;;
+                    yellow)     t_yellow="$val" ;;
+                    orange)     t_orange="$val" ;;
+                    # Legacy terminal-palette keys.
                     color1)     color1="$val" ;;
                     color2)     color2="$val" ;;
                     color3)     color3="$val" ;;
                 esac
             fi
         done < "$theme_file"
-        # Map theme colors to widget colors
-        [[ -n "$accent" ]]     && BLUE="$accent"
-        [[ -n "$foreground" ]] && FG="$foreground"
-        [[ -n "$color1" ]]     && { RED="$color1"; ORANGE="$color1"; }
-        [[ -n "$color2" ]]     && GREEN="$color2"
-        [[ -n "$color3" ]]     && YELLOW="$color3"
-        # DIM = midpoint between foreground and background
-        if [[ -n "$foreground" && -n "$background" ]]; then
-            DIM=$(hex_blend "$foreground" "$background")
-        fi
-        MARKER="$FG"
-        # BAR_EMPTY = slightly lighter than background (blend bg with dim)
-        if [[ -n "$background" ]]; then
-            BAR_EMPTY=$(hex_blend "$background" "$DIM")
-        fi
+        # Map theme colors to widget colors. Named keys win; the color1/2/3
+        # fallbacks keep older themes working exactly as before (where color1
+        # stood in for both red and orange).
+        set_color_var BLUE "$accent"
+        set_color_var FG   "$foreground"
+        # Candidates in priority order, and the FIRST USABLE one wins: a theme
+        # whose semantic key is malformed still gets its legacy color1/2/3
+        # honored, instead of the bad value shadowing the good one.
+        set_color_var_first RED    "$t_red" "$color1"
+        set_color_var_first ORANGE "$t_orange" "$t_red" "$color1"
+        set_color_var_first GREEN  "$t_green" "$color2"
+        set_color_var_first YELLOW "$t_yellow" "$color3"
+        apply_surface_colors "$foreground" "$background"
+        THEME_SOURCE="omarchy"
     fi
+    return 0
+}
+
+# DIM / MARKER / BAR_EMPTY are derived the same way from every color source.
+apply_surface_colors() {  # <foreground> <background>
+    local fg bg
+    fg=$(normalize_hex "${1:-}" 2>/dev/null) || fg=""
+    bg=$(normalize_hex "${2:-}" 2>/dev/null) || bg=""
+    is_hex_color "${1:-}" || fg=""
+    is_hex_color "${2:-}" || bg=""
+    # DIM = midpoint between foreground and background
+    [[ -n "$fg" && -n "$bg" ]] && DIM=$(hex_blend "$fg" "$bg")
+    MARKER="$FG"
+    # BAR_EMPTY = slightly lighter than background (blend bg with dim)
+    [[ -n "$bg" ]] && BAR_EMPTY=$(hex_blend "$bg" "$DIM")
+    return 0
+}
+
+# pywal-compatible palette, consulted ONLY when no Omarchy theme was found.
+# ${XDG_CACHE_HOME:-~/.cache}/wal/colors.json is the de-facto standard path:
+# the original pywal is archived, but the maintained pywal16 fork writes the
+# same file and wallust ships a pywal-compat target to it, so this one path
+# covers all three. Missing file, unreadable file, or invalid JSON degrades
+# silently to the built-in defaults — this function always returns 0.
+load_pywal_colors() {
+    [[ -z "$THEME_SOURCE" ]] || return 0
+    command -v jq &>/dev/null || return 0
+
+    local wal_file="${XDG_CACHE_HOME:-$HOME/.cache}/wal/colors.json"
+    [[ -f "$wal_file" && -r "$wal_file" ]] || return 0
+
+    # One pass, one value per line; `| strings` drops non-string values. Line
+    # separated rather than @tsv on purpose: a tab is IFS whitespace, so `read`
+    # would collapse runs of them and silently shift every value after a key the
+    # palette happens to omit. A parse failure yields no lines, and the count
+    # check below then leaves every field at its default.
+    local _pw=()
+    readarray -t _pw < <(jq -r '
+        ((.special.foreground | strings) // ""),
+        ((.special.background | strings) // ""),
+        ((.special.cursor     | strings) // ""),
+        ((.colors.color1      | strings) // ""),
+        ((.colors.color2      | strings) // ""),
+        ((.colors.color3      | strings) // ""),
+        ((.colors.color4      | strings) // "")' "$wal_file" 2>/dev/null) || true
+    (( ${#_pw[@]} == 7 )) || return 0
+
+    local pw_fg="${_pw[0]}" pw_bg="${_pw[1]}" pw_cursor="${_pw[2]}"
+    local pw_c1="${_pw[3]}" pw_c2="${_pw[4]}" pw_c3="${_pw[5]}" pw_c4="${_pw[6]}"
+
+    set_color_var FG     "$pw_fg"
+    set_color_var RED    "$pw_c1"
+    set_color_var GREEN  "$pw_c2"
+    set_color_var YELLOW "$pw_c3"
+    # accent: color4, or the cursor color when the palette omits it.
+    set_color_var BLUE   "${pw_c4:-$pw_cursor}"
+
+    # pywal has no orange slot. Synthesize it as the midpoint of yellow and red
+    # so the gauge keeps four distinct steps; aliasing it to red would flatten
+    # the 75-90% segment into one flat block.
+    local o_y o_r
+    if o_y=$(normalize_hex "$YELLOW" 2>/dev/null) && o_r=$(normalize_hex "$RED" 2>/dev/null); then
+        ORANGE=$(hex_blend "$o_y" "$o_r")
+    fi
+
+    apply_surface_colors "$pw_fg" "$pw_bg"
+    THEME_SOURCE="pywal"
+    return 0
 }
 
 # One Dark defaults (overridden by Omarchy theme if available)
@@ -209,13 +453,41 @@ DIM="#5c6370"
 FG="#abb2bf"
 BAR_EMPTY="#3e4451"
 MARKER="$FG"
+# Resolution chain: --color-* flags (applied below) > Omarchy theme > pywal
+# cache > these built-ins. Each loader is a no-op when the previous one already
+# supplied a palette, and every one of them returns 0 so `set -e` can't trip.
 load_theme_colors
+load_pywal_colors
 
-# Bar text colors: CLI overrides > theme > One Dark defaults
+# Bar text colors: CLI overrides > theme/pywal > One Dark defaults
 [[ -n "$BAR_COLOR_LOW" ]]      || BAR_COLOR_LOW="$GREEN"
 [[ -n "$BAR_COLOR_MID" ]]      || BAR_COLOR_MID="$YELLOW"
 [[ -n "$BAR_COLOR_HIGH" ]]     || BAR_COLOR_HIGH="$ORANGE"
 [[ -n "$BAR_COLOR_CRITICAL" ]] || BAR_COLOR_CRITICAL="$RED"
+
+# The gradient math needs 6-digit hex, but --color-* has always accepted any
+# Pango color spec, including names like "red". Normalize the anchors we can;
+# if any of them isn't hex, fall back to discrete steps so a named color keeps
+# rendering exactly as it did before the gradient existed, instead of feeding
+# "16#re" to the arithmetic and killing the script under `set -e`.
+GRADIENT_OK=true
+for _anchor in BAR_COLOR_LOW BAR_COLOR_MID BAR_COLOR_HIGH BAR_COLOR_CRITICAL; do
+    if is_hex_color "${!_anchor}"; then
+        printf -v "$_anchor" '%s' "$(normalize_hex "${!_anchor}")"
+    else
+        GRADIENT_OK=false
+    fi
+done
+
+# --- The gauge ---
+# One definition of the ramp: the percentages at which it turns, the severity
+# state each band carries, and the color anchored at each turn once the
+# resolution chain has run. severity_for(), color_for() and the --json
+# `palette.stops` all read these arrays, and the Omarchy panel consumes the
+# published stops, so moving a threshold moves every surface at once.
+GAUGE_PCTS=(0 50 75 90)
+GAUGE_STATES=(low mid high critical)
+GAUGE_COLORS=("$BAR_COLOR_LOW" "$BAR_COLOR_MID" "$BAR_COLOR_HIGH" "$BAR_COLOR_CRITICAL")
 
 BAR_LEN=20
 
@@ -226,10 +498,30 @@ WEEKLY_WINDOW=$(( 7 * 24 * 3600 ))  # 7 days
 # --- Helpers ---
 
 die() {
+    if [[ "$JSON_MODE" == "true" ]]; then
+        # Structured mode: raw data, no Pango. Strip the <b> tags die messages
+        # carry and flatten newlines; still always exit 0 with valid JSON.
+        # Callers write their line breaks as the two characters \ and n (the
+        # messages are double-quoted literals), so those collapse here too —
+        # otherwise a backslash-n would travel into the JSON as text.
+        local _m="$1"
+        _m="${_m//<b>/}"; _m="${_m//<\/b>/}"
+        _m="${_m//\\n/ }"; _m="${_m//$'\n'/ }"
+        if command -v jq &>/dev/null; then
+            jq -nc --arg m "$_m" '{schema_version:1, error:{message:$m}}'
+        else
+            _m="${_m//\\/\\\\}"; _m="${_m//\"/\\\"}"
+            printf '{"schema_version":1,"error":{"message":"%s"}}\n' "$_m"
+        fi
+        exit 0
+    fi
+    # Waybar tooltip: turn the callers' literal \n into a real newline so the
+    # second line renders as a line break instead of showing "\n" verbatim.
+    local _tip="${1//\\n/$'\n'}"
     if command -v jq &>/dev/null; then
-        jq -nc --arg t "⚠" --arg tip "$1" '{text:$t, tooltip:$tip, class:"critical"}'
+        jq -nc --arg t "⚠" --arg tip "$_tip" '{text:$t, tooltip:$tip, class:"critical"}'
     else
-        local _m="${1//\\/\\\\}"; _m="${_m//\"/\\\"}"
+        local _m="${_tip//\\/\\\\}"; _m="${_m//\"/\\\"}"; _m="${_m//$'\n'/\\n}"
         printf '{"text":"⚠","tooltip":"%s","class":"critical"}\n' "$_m"
     fi
     exit 0
@@ -239,11 +531,48 @@ die() {
 # "Loading…" widget in the low class so Waybar styles it like normal usage and
 # doesn't draw attention to a state that will self-resolve on the next dispatch.
 loading_network() {
+    if [[ "$JSON_MODE" == "true" ]]; then
+        jq -nc '{schema_version:1, loading:true, error:null}'
+        exit 0
+    fi
     jq -nc \
         --arg t "${BAR_ICON:+${BAR_ICON} }Loading…" \
         --arg tip "Waiting for network — no cached usage yet.\nWill retry shortly." \
         '{text:$t, tooltip:$tip, class:"low"}'
     exit 0
+}
+
+# Strip color from Pango markup while keeping everything structural: only the
+# painting attributes go, so <span font_weight='bold'> stays bold, glyphs, bar
+# fill characters, markers and box drawing are untouched, and an attribute-less
+# <span> renders exactly like plain text.
+#
+# Tag-aware on purpose. The bar and tooltip may carry the user's own --format
+# markup, so this has to cover attributes we never emit (double-quoted values,
+# background=, the underline/overline/strikethrough colors) — while leaving
+# body text that merely looks like an attribute alone. Names are matched in
+# lowercase because that is the only spelling Pango itself honors.
+decolor() {
+    awk '''
+    BEGIN {
+        q = sprintf("%c", 39)   # single quote, built here to dodge shell quoting
+        names = "foreground|fgcolor|color|background|bgcolor|underline_color|overline_color|strikethrough_color"
+        re = "[ \t]+(" names ")[ \t]*=[ \t]*(\"[^\"]*\"|" q "[^" q "]*" q "|[^ \t>]+)"
+    }
+    {
+        out = ""; rest = $0
+        while ((i = index(rest, "<")) > 0) {
+            out = out substr(rest, 1, i - 1)
+            after = substr(rest, i + 1)
+            j = index(after, ">")
+            if (j == 0) { out = out substr(rest, i); rest = ""; break }
+            tag = substr(after, 1, j - 1)
+            rest = substr(after, j + 1)
+            gsub(re, "", tag)
+            out = out "<" tag ">"
+        }
+        print out rest
+    }'''
 }
 
 # Relative age for stale messaging. Negative (clock skew) → empty, caller omits it.
@@ -257,31 +586,115 @@ rel_age() {
     fi
 }
 
+# Usage severity for a window percent, read off the gauge definition above:
+# the highest band whose threshold the value has reached. Single source of
+# truth for the discrete states — the Waybar class and the --json per-window
+# "state" field both derive from this, and color_for interpolates between the
+# very same thresholds.
+severity_for() {
+    local p=$1 i
+    for (( i = ${#GAUGE_PCTS[@]} - 1; i > 0; i-- )); do
+        (( p >= GAUGE_PCTS[i] )) && { printf '%s' "${GAUGE_STATES[i]}"; return; }
+    done
+    printf '%s' "${GAUGE_STATES[0]}"
+}
+
+# Continuous usage color: linear interpolation between the gauge anchors, so a
+# percentage lands on exactly the color the published `palette.stops` describe.
+# Anchors come from the resolution chain (--color-* > theme > pywal > built-in),
+# which is why user overrides reshape the whole ramp and not just its ends.
 color_for() {
-    local p=$1
-    if   (( p >= 90 )); then printf '%s' "$RED"
-    elif (( p >= 75 )); then printf '%s' "$ORANGE"
-    elif (( p >= 50 )); then printf '%s' "$YELLOW"
-    else printf '%s' "$GREEN"
+    local p=$1 i last span
+    (( p < 0 )) && p=0
+    last=$(( ${#GAUGE_PCTS[@]} - 1 ))
+
+    # A non-hex anchor (a Pango color name) cannot be interpolated; fall back to
+    # discrete steps, which is exactly how this behaved before the gradient.
+    if [[ "$GRADIENT_OK" != "true" ]]; then
+        for (( i = last; i > 0; i-- )); do
+            (( p >= GAUGE_PCTS[i] )) && { printf '%s' "${GAUGE_COLORS[i]}"; return; }
+        done
+        printf '%s' "${GAUGE_COLORS[0]}"
+        return
+    fi
+
+    (( p >= GAUGE_PCTS[last] )) && { printf '%s' "${GAUGE_COLORS[last]}"; return; }
+    for (( i = last - 1; i >= 0; i-- )); do
+        if (( p >= GAUGE_PCTS[i] )); then
+            span=$(( GAUGE_PCTS[i + 1] - GAUGE_PCTS[i] ))
+            (( span <= 0 )) && { printf '%s' "${GAUGE_COLORS[i]}"; return; }
+            hex_lerp "${GAUGE_COLORS[i]}" "${GAUGE_COLORS[i + 1]}" \
+                $(( (p - GAUGE_PCTS[i]) * 1000 / span ))
+            return
+        fi
+    done
+    printf '%s' "${GAUGE_COLORS[0]}"
+}
+
+# Pacing severity based on signed pacing delta, centered around zero:
+#   <= -11  under   (well under pace, plenty of room)     → green
+#   -10..0  on_pace (slightly under or exactly on pace)   → yellow
+#   1..+9   ahead   (slightly ahead, watch it)            → orange
+#   >= +10  hot     (burning fast)                        → red
+# Same single-source rule as severity_for: --format-pace-color and the
+# --json per-window pace "state" field both derive from this.
+pace_severity_for() {
+    local delta=${1:-0}
+    if   (( delta >= 10 ));  then printf 'hot'
+    elif (( delta > 0 ));    then printf 'ahead'
+    elif (( delta >= -10 )); then printf 'on_pace'
+    else printf 'under'
     fi
 }
 
-# Color based on signed pacing delta, centered around zero:
-#   <= -10  green   (well under pace, plenty of room)
-#   -10..0  yellow  (slightly under or exactly on pace)
-#   1..+9   orange  (slightly ahead, watch it)
-#   >= +10  red     (burning fast)
 pace_color_for() {
-    local delta=${1:-0}
-    if   (( delta >= 10 ));  then printf '%s' "$RED"
-    elif (( delta > 0 ));    then printf '%s' "$ORANGE"
-    elif (( delta >= -10 )); then printf '%s' "$YELLOW"
-    else printf '%s' "$GREEN"
+    case "$(pace_severity_for "${1:-0}")" in
+        hot)     printf '%s' "$RED" ;;
+        ahead)   printf '%s' "$ORANGE" ;;
+        on_pace) printf '%s' "$YELLOW" ;;
+        *)       printf '%s' "$GREEN" ;;
+    esac
+}
+
+# Per-cell gradient colors for bar fills, precomputed once per run: the ramp
+# is a fixed function of cell position (cell k sits at k*100/(BAR_LEN-1)
+# percent, so a full bar sweeps low → critical anchor to anchor).
+GRAD_CELLS=()
+init_grad_cells() {
+    local k
+    for (( k = 0; k < BAR_LEN; k++ )); do
+        GRAD_CELLS[k]=$(color_for $(( k * 100 / (BAR_LEN - 1) )))
+    done
+}
+
+# One run of filled cells with per-cell gradient colors (positional).
+grad_fill() {  # <start_cell> <count>
+    local k end=$(( $1 + $2 ))
+    for (( k = $1; k < end; k++ )); do
+        printf "<span foreground='%s'>█</span>" "${GRAD_CELLS[k]}"
+    done
+}
+
+# make_bar helpers. Both read make_bar's locals via bash dynamic scoping.
+_mb_fill() {  # <start_cell> <count> — flat span, or per-cell gradient when $color is empty
+    if [[ -n "$color" ]]; then
+        local run; printf -v run '%*s' "$2" ''
+        printf "<span foreground='%s'>%s</span>" "$color" "${run// /█}"
+    else
+        grad_fill "$1" "$2"
     fi
+}
+_mb_empty() {  # <count>
+    local run; printf -v run '%*s' "$1" ''
+    printf "<span foreground='%s'>%s</span>" "$BAR_EMPTY" "${run// /░}"
 }
 
 # Build a progress bar with optional elapsed marker.
 # Usage: make_bar <pct> <color> [marker_pct] [marker_color]
+# An empty <color> renders the filled cells with the per-cell gradient
+# (init_grad_cells) instead of a flat color — used by usage-framed bars,
+# where the fill sweeps the severity ramp left to right. Remaining-framed
+# bars keep a flat fill: their length means "what's left", not "how hot".
 # When marker is provided, a ┃ (gate) in marker_color is placed at the elapsed
 # position, showing where you'd be if pacing evenly across the window.
 make_bar() {
@@ -290,11 +703,9 @@ make_bar() {
     (( filled > BAR_LEN )) && filled=$BAR_LEN
     (( filled < 0 )) && filled=0
 
-    local f="" e=""
     if (( marker_pos < 0 )); then
-        printf -v f '%*s' "$filled" ''; printf -v e '%*s' "$(( BAR_LEN - filled ))" ''
-        printf "<span foreground='%s'>%s</span><span foreground='%s'>%s</span>" \
-            "$color" "${f// /█}" "$BAR_EMPTY" "${e// /░}"
+        _mb_fill 0 "$filled"
+        _mb_empty $(( BAR_LEN - filled ))
         return
     fi
 
@@ -303,13 +714,11 @@ make_bar() {
     local pre_f=$(( filled < m ? filled : m ))
     local post_f=$(( filled > m + 1 ? filled - m - 1 : 0 ))
 
-    printf -v f '%*s' "$pre_f" ''; printf -v e '%*s' "$(( m - pre_f ))" ''
-    printf "<span foreground='%s'>%s</span><span foreground='%s'>%s</span>" \
-        "$color" "${f// /█}" "$BAR_EMPTY" "${e// /░}"
+    _mb_fill 0 "$pre_f"
+    _mb_empty $(( m - pre_f ))
     printf "<span foreground='%s'>┃</span>" "$marker_color"
-    printf -v f '%*s' "$post_f" ''; printf -v e '%*s' "$(( BAR_LEN - m - 1 - post_f ))" ''
-    printf "<span foreground='%s'>%s</span><span foreground='%s'>%s</span>" \
-        "$color" "${f// /█}" "$BAR_EMPTY" "${e// /░}"
+    _mb_fill $(( m + 1 )) "$post_f"
+    _mb_empty $(( BAR_LEN - m - 1 - post_f ))
 }
 
 countdown() {
@@ -396,14 +805,15 @@ sub_type=$(jq -r 'try (.claudeAiOauth.subscriptionType // "unknown") catch "unkn
 rate_tier=$(jq -r 'try (.claudeAiOauth.rateLimitTier // "") catch ""' <<< "$creds")
 
 # --- Cache / lock setup ---
-mkdir -p "$CACHE_DIR"
+mkdir -p "$CACHE_DIR" 2>/dev/null || die "Cannot create cache dir.\nCheck ~/.cache permissions."
 cache_file="$CACHE_DIR/usage.json"
+credits_file="$CACHE_DIR/credits.json"
 stale_marker="$CACHE_DIR/.stale"
 net_wait_marker="$CACHE_DIR/.net_wait"
 _lockfile="$CACHE_DIR/.fetch.lock"
 
 _fetch_usage() {
-    if [[ -f "$cache_file" ]] && (( cache_age < CACHE_TTL )); then
+    if [[ "$FORCE_REFRESH" != "true" ]] && [[ -f "$cache_file" ]] && (( cache_age < CACHE_TTL )); then
         usage=$(<"$cache_file")
         return
     fi
@@ -480,11 +890,67 @@ _fetch_usage() {
     fi
 }
 
+_fetch_balance() {
+    # No usage-credit ledger means there is nothing to query. Keep this
+    # best-effort: usage windows must remain available even if the separate
+    # prepaid endpoint is unavailable or changes upstream.
+    local _has_credits
+    _has_credits=$(jq 'try (.extra_usage != null) catch false' <<< "$usage" 2>/dev/null) || _has_credits=false
+    [[ "$_has_credits" == "true" && "$auth_ok" == "true" ]] || return 0
+
+    local _org_uuid="${CLAUDE_CODE_ORGANIZATION_UUID:-}"
+    if [[ -z "$_org_uuid" && -f "$HOME/.claude.json" ]]; then
+        _org_uuid=$(jq -r 'try ((.oauthAccount.organizationUuid | strings) // "") catch ""' \
+            "$HOME/.claude.json" 2>/dev/null) || _org_uuid=""
+    fi
+    # The identifier is inserted into a URL path, so reject anything beyond
+    # Claude's UUID-like alphabet instead of letting account data shape curl.
+    [[ "$_org_uuid" =~ ^[A-Za-z0-9-]+$ ]] || return 0
+
+    local _credits_age=-1
+    if [[ -f "$credits_file" ]]; then
+        _credits_age=$(( now_s - $(date -r "$credits_file" +%s) ))
+    fi
+    if [[ "$FORCE_REFRESH" != "true" ]] && (( _credits_age >= 0 && _credits_age < CACHE_TTL )); then
+        return
+    fi
+
+    local _credits_url="${API_BASE_URL}/api/oauth/organizations/${_org_uuid}/prepaid/credits"
+    local _credits_raw _credits_code _credits_body
+    # Feed the bearer header through stdin so the token never appears in the
+    # curl argv/process list.
+    _credits_raw=$(printf 'header = "Authorization: Bearer %s"\nheader = "anthropic-beta: oauth-2025-04-20"\n' \
+        "$access_token" | curl --config - -s --max-time 10 -w '\n%{http_code}' "$_credits_url") || true
+    _credits_code="${_credits_raw##*$'\n'}"
+    _credits_body="${_credits_raw%$'\n'"$_credits_code"}"
+    [[ "$_credits_code" =~ ^[0-9]{3}$ ]] || _credits_code="000"
+
+    if [[ "$_credits_code" == "200" ]] && jq -e -s '
+        length == 1 and (.[0] | type) == "object"
+        and ((.[0].amount | type) == "number")
+        and (.[0].amount >= 0) and (.[0].amount <= 1e12)
+      ' <<< "$_credits_body" &>/dev/null; then
+        local _btmp
+        _btmp=$(mktemp "$CACHE_DIR/.credits.XXXXXX" 2>/dev/null) || _btmp=""
+        if [[ -n "$_btmp" ]]; then
+            if printf '%s' "$_credits_body" > "$_btmp" && mv "$_btmp" "$credits_file"; then
+                :
+            else
+                rm -f "$_btmp" 2>/dev/null || true
+            fi
+        fi
+    fi
+}
+
 # --- Acquire lock for the state-changing window (refresh + usage fetch) ---
 # Multi-monitor: peer instances may rotate the refresh_token between our initial
 # read and our refresh attempt; locking and re-reading prevents a stale-token
 # refresh from writing a misleading .last_error while credentials are actually fine.
-exec 9>"$_lockfile"
+# Braces, not a bare `exec ... 2>/dev/null`: a redirection on `exec` with no
+# command persists for the REST OF THE SCRIPT, so the bare form silenced every
+# later diagnostic (it hid a missing-function bug during development). The
+# group scopes the silencing to this one attempt while fd 9 still survives it.
+{ exec 9>"$_lockfile"; } 2>/dev/null || die "Cannot open cache lock.\nCheck ~/.cache permissions."
 # Generous wait: a boot-like sibling may hold the lock for the long budget plus
 # in-flight curls (worst ≈ NET_LONG_BUDGET + 25s refresh + 10s fetch ≈ 57s);
 # rendering late beats dying with a visible "Cache lock timeout".
@@ -605,6 +1071,7 @@ if (( expires_s < now_s + REFRESH_BUFFER )); then
 fi
 
 _fetch_usage
+_fetch_balance
 exec 9>&-
 
 # A corrupt or partially-written cache could leave $usage as invalid JSON; the
@@ -646,8 +1113,9 @@ display_bar() {  # <used_pct> <elapsed> [marker_on]  (marker_on: pass "$TOOLTIP_
         if [[ "$marker_on" == "true" ]]; then make_bar "$rem" "$color" "$(( 100 - elapsed ))" "$MARKER"
         else make_bar "$rem" "$color"; fi
     else
-        if [[ "$marker_on" == "true" ]]; then make_bar "$used" "$color" "$elapsed" "$MARKER"
-        else make_bar "$used" "$color"; fi
+        # Usage framing: per-cell gradient fill (empty color arg).
+        if [[ "$marker_on" == "true" ]]; then make_bar "$used" "" "$elapsed" "$MARKER"
+        else make_bar "$used" ""; fi
     fi
 }
 
@@ -717,16 +1185,45 @@ model_remaining_pct=$(remaining_pct_for "$model_pct")
 # --- Extra usage ---
 # Show whenever there is real spend data, not only when actively enabled: the API
 # reports is_enabled=false (disabled_reason "out_of_credits") once the balance is
-# depleted, but the spend ($used of $limit) is still present and is exactly what
-# the Claude usage page shows. Gating on is_enabled hid it in that state.
+# depleted, but month-to-date spend and the cap remain present. Gating on
+# is_enabled hid the useful spending history in that state.
 has_extra=$(jq 'try (.extra_usage != null) catch false' <<< "$usage")
 extra_show="false"
 extra_spent=""
+extra_available=""
+extra_funded=""
 extra_limit=""
 extra_pct=0
+extra_pct_value=0
+extra_balance_known=false
+local_available=0
+local_funded=0
 if [[ "$has_extra" == "true" ]]; then
     local_limit=$(jq -r 'try (((.extra_usage.monthly_limit | numbers) // 0) | floor | if (. > 1e12 or . < 0) then 0 else . end) catch 0' <<< "$usage")
     local_used=$(jq -r 'try (((.extra_usage.used_credits | numbers) // 0) | floor | if (. > 1e12 or . < 0) then 0 else . end) catch 0' <<< "$usage")
+    disabled_reason=$(jq -r 'try ((.extra_usage.disabled_reason | strings) // "") catch ""' <<< "$usage")
+
+    # The prepaid balance is independent from the monthly spending limit. Use
+    # the separately cached ledger response when it is a safe non-negative
+    # integer; if Claude explicitly says the ledger is exhausted, zero is exact.
+    # Any other missing/malformed balance stays unknown — never substitute the
+    # monthly limit, which is only a safety cap.
+    _credits_fresh=false
+    if [[ -f "$credits_file" ]]; then
+        _credits_age=$(( $(date +%s) - $(date -r "$credits_file" +%s) ))
+        (( _credits_age >= 0 && _credits_age < CACHE_TTL )) && _credits_fresh=true
+    fi
+    if [[ "$_credits_fresh" == "true" ]] && jq -e -s '
+        length == 1 and (.[0] | type) == "object"
+        and ((.[0].amount | type) == "number")
+        and (.[0].amount >= 0) and (.[0].amount <= 1e12)
+      ' "$credits_file" &>/dev/null; then
+        local_available=$(jq -r '.amount | floor' "$credits_file")
+        extra_balance_known=true
+    elif [[ "$disabled_reason" == "out_of_credits" ]]; then
+        local_available=0
+        extra_balance_known=true
+    fi
     # Only populate display values (and show the section) when there is real
     # spend data — leaving the dollar placeholders empty for a zero/never-set
     # extra_usage object, exactly as when this was gated on is_enabled.
@@ -742,8 +1239,19 @@ if [[ "$has_extra" == "true" ]]; then
         }
         extra_limit=$(_fmt_dollars "$local_limit")
         extra_spent=$(_fmt_dollars "$local_used")
-        if (( local_limit > 0 )); then
-            extra_pct=$(( local_used * 100 / local_limit ))
+        if [[ "$extra_balance_known" == "true" ]]; then
+            local_funded=$(( local_used + local_available ))
+            extra_available=$(_fmt_dollars "$local_available")
+            extra_funded=$(_fmt_dollars "$local_funded")
+            if (( local_funded > 0 )); then
+                # Round to the nearest whole percent; QML and Waybar consume
+                # the same normalized value. Clamp hostile/inconsistent data.
+                extra_pct_value=$(( (local_used * 100 + local_funded / 2) / local_funded ))
+                (( extra_pct_value > 100 )) && extra_pct_value=100
+            fi
+            extra_pct=$extra_pct_value
+        else
+            extra_pct=""
         fi
     fi
 fi
@@ -828,14 +1336,171 @@ max_pct=$session_pct
 (( sonnet_pct > max_pct )) && max_pct=$sonnet_pct
 (( model_max_pct > max_pct )) && max_pct=$model_max_pct
 if (( session_pct >= 100 || weekly_pct >= 100 || sonnet_pct >= 100 || model_max_pct >= 100 )); then
-    (( extra_pct > max_pct )) && max_pct=$extra_pct
+    (( extra_pct_value > max_pct )) && max_pct=$extra_pct_value
 fi
 
-class=""
-if   (( max_pct >= 90 )); then class="critical"
-elif (( max_pct >= 75 )); then class="high"
-elif (( max_pct >= 50 )); then class="mid"
-else class="low"
+class=$(severity_for "$max_pct")
+
+# --- Bar text color: the value the bar SHOWS, not the worst one ---
+# `class` above is the Waybar CSS class and must stay worst-of-all — that is what
+# a user styles "critical" on. The bar TEXT is different: colouring a 34% session
+# red because a hidden weekly limit is high reports a severity the number beside
+# it does not have, and it disagreed with the Omarchy panel, which paints the
+# ramp at the percentage it displays. So the tint follows whichever window the
+# format actually puts on the bar; a format that names neither keeps the default
+# (session), and a maxed-out OTHER window still reaches the user through the CSS
+# class and the tooltip.
+bar_pct=$session_pct
+if [[ "$FORMAT" != *"{session_pct}"* ]]; then
+    if   [[ "$FORMAT" == *"{weekly_pct}"* ]]; then bar_pct=$weekly_pct
+    elif [[ "$FORMAT" == *"{sonnet_pct}"* ]]; then bar_pct=$sonnet_pct
+    fi
+fi
+bar_class=$(severity_for "$bar_pct")
+
+# --- Structured JSON output (--json) ---
+# Raw data for alternative frontends (e.g. the Omarchy shell plugin in
+# omarchy/): numbers stay numbers, timestamps stay ISO-8601, severity is a
+# state string from severity_for/pace_severity_for. Presentation — colors,
+# bars, countdown text — is entirely the frontend's job, so no Pango here.
+if [[ "$JSON_MODE" == "true" ]]; then
+    # Reverse of the Pango esc applied when model names were extracted
+    # (& was escaped first there, so it is unescaped last here). The quoted
+    # "&" keeps the replacement literal under bash 5.2's patsub_replacement,
+    # where an unquoted & would expand to the match itself.
+    unescape_pango() {
+        local s="$1"
+        s="${s//&lt;/<}"; s="${s//&gt;/>}"; s="${s//&amp;/"&"}"
+        printf '%s' "$s"
+    }
+
+    # One usage window as a JSON object.
+    # Args: used_pct resets_at elapsed_pct pace_icon pace_indicator pace_delta
+    #       pace_pct_label pace_pts_label
+    json_window() {
+        jq -nc \
+            --argjson pct "$1" --arg reset "$2" --argjson elapsed "$3" \
+            --arg icon "$4" --arg indicator "$5" --argjson delta "${6:-0}" \
+            --arg pctl "$7" --arg ptsl "$8" \
+            --argjson rem "$(remaining_pct_for "$1")" \
+            --arg state "$(severity_for "$1")" \
+            --arg pstate "$(pace_severity_for "${6:-0}")" \
+            '{used_pct:$pct, remaining_pct:$rem,
+              resets_at:(if $reset == "" then null else $reset end),
+              elapsed_pct:$elapsed, state:$state,
+              pace:{delta_pts:$delta, icon:$icon, indicator:$indicator,
+                    ratio_label:$pctl, pts_label:$ptsl, state:$pstate}}'
+    }
+
+    _json_sonnet="null"
+    if [[ "$has_sonnet" == "true" ]]; then
+        _json_sonnet=$(json_window "$sonnet_pct" "$sonnet_reset" "$sonnet_elapsed" \
+            "$sonnet_pace" "$sonnet_pace_indicator" "$sonnet_pace_delta" \
+            "$sonnet_pace_pct" "$sonnet_pace_pts")
+    fi
+
+    # One entry per model-scoped weekly limit. Index 0 reuses the pacing
+    # already computed for the {model_*} placeholders; later entries compute
+    # inline — same split the tooltip renderer uses.
+    _json_models="[]"
+    for _mi in "${!model_pcts[@]}"; do
+        _mp="${model_pcts[$_mi]}"
+        if (( _mi == 0 )); then
+            _me=$model_elapsed _mic=$model_pace _min=$model_pace_indicator
+            _md=$model_pace_delta _mpl=$model_pace_pct _mtl=$model_pace_pts
+        else
+            _mo=$(calc_pacing "$_mp" "${model_resets[$_mi]}" "$WEEKLY_WINDOW")
+            read -r _me _mic _min _md _discard <<< "$_mo"
+            _mpl=$(cut -d' ' -f5-6 <<< "$_mo")
+            _mtl=$(cut -d' ' -f7-8 <<< "$_mo")
+        fi
+        _mw=$(json_window "$_mp" "${model_resets[$_mi]}" "$_me" "$_mic" "$_min" "$_md" "$_mpl" "$_mtl")
+        _json_models=$(jq -c --argjson w "$_mw" --arg n "$(unescape_pango "${model_names_esc[$_mi]}")" \
+            '. + [{name:$n} + $w]' <<< "$_json_models")
+    done
+
+    _json_extra="null"
+    if [[ "$extra_show" == "true" ]]; then
+        _json_available=null _json_funded=null _json_extra_pct=null
+        if [[ "$extra_balance_known" == "true" ]]; then
+            _json_available=$local_available
+            _json_funded=$local_funded
+            _json_extra_pct=$extra_pct_value
+        fi
+        _json_extra=$(jq -nc \
+            --argjson used "$local_used" --argjson limit "$local_limit" \
+            --argjson available "$_json_available" --argjson funded "$_json_funded" \
+            --argjson known "$extra_balance_known" --argjson pct "$_json_extra_pct" \
+            --arg state "$(severity_for "$extra_pct_value")" \
+            '{used_credit_cents:$used, available_credit_cents:$available,
+              funded_credit_cents:$funded, monthly_limit_cents:$limit,
+              balance_known:$known, used_pct:$pct, state:$state}')
+    fi
+
+    _json_updated=""
+    _json_age=null
+    if [[ -f "$cache_file" ]]; then
+        _jcts=$(date -r "$cache_file" +%s)
+        _json_updated=$(date -u -d "@${_jcts}" +%Y-%m-%dT%H:%M:%SZ)
+        _json_age=$(( $(date +%s) - _jcts ))
+        # Future mtime (clock skew) must not leak a negative age.
+        (( _json_age < 0 )) && _json_age=0
+    fi
+    _json_stale=false
+    _json_stale_kind=""
+    if [[ "${transient_stale:-false}" == "true" ]]; then
+        _json_stale=true; _json_stale_kind="network"
+    elif [[ -f "$stale_marker" ]]; then
+        _json_stale=true; _json_stale_kind="api"
+    fi
+    _json_err_code=""
+    _json_err_msg=""
+    if [[ -f "$CACHE_DIR/.last_error" ]]; then
+        { read -r _json_err_code || true; read -r _json_err_msg || true; } < "$CACHE_DIR/.last_error" 2>/dev/null || true
+        [[ "$_json_err_code" =~ ^[0-9]+$ && "$_json_err_code" != "000" ]] || _json_err_code=""
+    fi
+
+    # The ramp itself, colors and the percentages they sit at, so a frontend
+    # interpolates the same gauge instead of hardcoding these thresholds again.
+    _gauge_rows=""
+    for _gi in "${!GAUGE_PCTS[@]}"; do
+        _gauge_rows+="${GAUGE_PCTS[$_gi]} ${GAUGE_COLORS[$_gi]}"$'\n'
+    done
+    _json_stops=$(printf '%s' "$_gauge_rows" | jq -R -s '
+        split("\n") | map(select(length > 0) | split(" ")
+                          | {pct: (.[0] | tonumber), color: .[1]})')
+
+    jq -nc \
+        --arg plan "$plan" \
+        --arg pal_low "$BAR_COLOR_LOW" --arg pal_mid "$BAR_COLOR_MID" \
+        --arg pal_high "$BAR_COLOR_HIGH" --arg pal_critical "$BAR_COLOR_CRITICAL" \
+        --argjson pal_stops "$_json_stops" \
+        --argjson session "$(json_window "$session_pct" "$session_reset" "$session_elapsed" \
+            "$session_pace" "$session_pace_indicator" "$session_pace_delta" \
+            "$session_pace_pct" "$session_pace_pts")" \
+        --argjson weekly "$(json_window "$weekly_pct" "$weekly_reset" "$weekly_elapsed" \
+            "$weekly_pace" "$weekly_pace_indicator" "$weekly_pace_delta" \
+            "$weekly_pace_pct" "$weekly_pace_pts")" \
+        --argjson sonnet "$_json_sonnet" \
+        --argjson models "$_json_models" \
+        --argjson extra "$_json_extra" \
+        --argjson max_pct "$max_pct" --arg overall "$class" \
+        --arg updated "$_json_updated" --argjson age "$_json_age" \
+        --argjson stale "$_json_stale" --arg stale_kind "$_json_stale_kind" \
+        --arg err_code "$_json_err_code" --arg err_msg "$_json_err_msg" \
+        '{schema_version:1, plan:$plan,
+          session:$session, weekly:$weekly, sonnet:$sonnet, models:$models,
+          extra_usage:$extra,
+          palette:{low:$pal_low, mid:$pal_mid, high:$pal_high, critical:$pal_critical,
+                   stops:$pal_stops},
+          overall:{max_pct:$max_pct, state:$overall},
+          cache:{updated_at:(if $updated == "" then null else $updated end),
+                 age_s:$age, stale:$stale,
+                 stale_kind:(if $stale_kind == "" then null else $stale_kind end)},
+          error:(if $err_code == "" then null
+                 else {message:(if $err_msg == "" then ("HTTP " + $err_code) else $err_msg end),
+                       code:($err_code|tonumber)} end)}'
+    exit 0
 fi
 
 # --- Apply format placeholders ---
@@ -916,16 +1581,20 @@ m_cd_val=""
 
 # Per-window colors and bars used by --format / --tooltip-format placeholders.
 # Each bar is colored by its own window's usage, independent of the bar text wrapper.
+# Usage-framed bars carry the per-cell gradient; remaining-framed bars keep a
+# flat fill colored by the (continuous) usage color.
+init_grad_cells
 session_color=$(color_for "$session_pct")
 weekly_color=$(color_for "$weekly_pct")
 sonnet_color=$(color_for "$sonnet_pct")
 model_color=$(color_for "$model_pct")
-extra_color=$(color_for "$extra_pct")
-format_session_bar=$(make_bar "$session_pct" "$session_color")
-format_weekly_bar=$(make_bar "$weekly_pct" "$weekly_color")
-format_sonnet_bar=$(make_bar "$sonnet_pct" "$sonnet_color")
-format_model_bar=$(make_bar "$model_pct" "$model_color")
-format_extra_bar=$(make_bar "$extra_pct" "$extra_color")
+extra_color=$(color_for "$extra_pct_value")
+format_session_bar=$(make_bar "$session_pct" "")
+format_weekly_bar=$(make_bar "$weekly_pct" "")
+format_sonnet_bar=$(make_bar "$sonnet_pct" "")
+format_model_bar=$(make_bar "$model_pct" "")
+format_extra_bar=""
+[[ "$extra_balance_known" == "true" ]] && format_extra_bar=$(make_bar "$extra_pct_value" "")
 format_session_remaining_bar=$(make_bar "$session_remaining_pct" "$session_color")
 format_weekly_remaining_bar=$(make_bar "$weekly_remaining_pct" "$weekly_color")
 format_sonnet_remaining_bar=$(make_bar "$sonnet_remaining_pct" "$sonnet_color")
@@ -933,19 +1602,25 @@ format_model_remaining_bar=$(make_bar "$model_remaining_pct" "$model_color")
 
 # Stale data indicator
 stale_icon=""
-[[ -f "$stale_marker" || "${transient_stale:-false}" == "true" ]] && stale_icon=" ⏸"
+[[ -f "$stale_marker" || "${transient_stale:-false}" == "true" ]] && stale_icon=" "   # nf-fa-pause (U+23F8 renders as a color emoji)
 
 bar_text=$(apply_format "$FORMAT")${stale_icon}
 
 # --- Colorize bar text via Pango ---
-case "$class" in
+case "$bar_class" in
     low)      bar_fg="$BAR_COLOR_LOW" ;;
     mid)      bar_fg="$BAR_COLOR_MID" ;;
     high)     bar_fg="$BAR_COLOR_HIGH" ;;
     critical) bar_fg="$BAR_COLOR_CRITICAL" ;;
     *)        bar_fg="$BAR_COLOR_LOW" ;;
 esac
-if [[ "$FORMAT_PACE_COLOR" == "true" && "$FORMAT" == *_pace* ]]; then
+if [[ "$BAR_PLAIN" == "true" ]]; then
+    # Monochrome bar: no wrapper, and any color a placeholder brought with it
+    # (progress bars, per-window pace colors) is stripped. The class field is
+    # untouched, so CSS remains the way to style this.
+    bar_text="${BAR_ICON:+${BAR_ICON} }${bar_text}"
+    bar_text=$(printf '%s' "$bar_text" | decolor)
+elif [[ "$FORMAT_PACE_COLOR" == "true" && "$FORMAT" == *_pace* ]]; then
     # Neutral base; pace placeholders provide their own color
     bar_text="<span foreground='${FG}'>${BAR_ICON:+${BAR_ICON} }${bar_text}</span>"
 else
@@ -963,10 +1638,16 @@ if [[ -f "$cache_file" ]]; then
     _data_age=$(rel_age $(( $(date +%s) - $(date -r "$cache_file" +%s) )))
 fi
 _stale_note=""
+# Suffix for the freshness footer. The footer always says when the data is
+# from; this only adds WHY it is not fresh, in the same words the Omarchy shell
+# panel uses.
+_stale_suffix=""
 if [[ "${transient_stale:-false}" == "true" ]]; then
-    _stale_note="⏸  Waiting for network — data from ${_updated}${_data_age:+ (${_data_age})}"
+    _stale_note="  Waiting for network — data from ${_updated}${_data_age:+ (${_data_age})}"
+    _stale_suffix="<span foreground='${ORANGE}'> · stale (waiting for network)</span>"
 elif [[ -f "$stale_marker" ]]; then
-    _stale_note="⏸  Stale — data from ${_updated}${_data_age:+ (${_data_age})}"
+    _stale_note="  Stale — data from ${_updated}${_data_age:+ (${_data_age})}"
+    _stale_suffix="<span foreground='${ORANGE}'> · stale (API errors)</span>"
 fi
 
 # --- Tooltip ---
@@ -1045,8 +1726,14 @@ else
         lines+=("")
         lines+=("SEP")
         lines+=(" <span foreground='${FG}'>  󰄑  Extra usage</span>")
-        lines+=("   ${format_extra_bar}  $(_val_pad "${extra_spent}")<span font_weight='bold' foreground='${extra_color}'>${extra_spent}</span>")
-        lines+=(" <span foreground='${DIM}'>  󰀓  Limit: ${extra_limit}</span>")
+        if [[ "$extra_balance_known" == "true" ]]; then
+            lines+=(" <span foreground='${DIM}'>  󰄑  Spent: ${extra_spent} / ${extra_funded}</span>  <span font_weight='bold' foreground='${extra_color}'>${extra_pct}%</span>")
+            lines+=("   ${format_extra_bar}")
+            lines+=(" <span foreground='${DIM}'>  󰄰  Available: ${extra_available} · Monthly limit: ${extra_limit}</span>")
+        else
+            lines+=(" <span foreground='${DIM}'>  󰄑  Spent: ${extra_spent} / —</span>")
+            lines+=(" <span foreground='${DIM}'>  󰄰  Available: — · Monthly limit: ${extra_limit}</span>")
+        fi
     fi
 
     # API error info (if stale)
@@ -1081,14 +1768,14 @@ else
         fi
     fi
 
-    # Footer: explicit stale status, or "Updated HH:MM" when data is fresh.
+    # Footer: the house freshness line — separator rule, clock glyph,
+    # "Updated HH:MM", and a "· stale (...)" suffix only when the data is not
+    # fresh. Identical shape in the Omarchy shell panel and in every sibling
+    # widget, so a reader learns it once. The blank line above the rule is this
+    # tooltip's own section rhythm (every section is preceded by one).
     lines+=("")
     lines+=("SEP")
-    if [[ -n "$_stale_note" ]]; then
-        lines+=(" <span foreground='${ORANGE}'>  ${_stale_note}</span>")
-    else
-        lines+=(" <span foreground='${DIM}'>  󰅐  Updated ${_updated}</span>")
-    fi
+    lines+=(" <span foreground='${DIM}'>  󰅐  Updated ${_updated}</span>${_stale_suffix}")
 
     # Calculate max width from content
     max_w=0
@@ -1170,6 +1857,13 @@ else
         done
         t="${t%"$NL"}"
     fi
+fi
+
+# Monochrome tooltip: strip color from the finished markup, whichever path
+# built it (default, --tooltip-format, framed). Bars, markers, box drawing,
+# bold and layout survive; only the hues go.
+if [[ "$TOOLTIP_PLAIN" == "true" ]]; then
+    t=$(printf '%s' "$t" | decolor)
 fi
 
 # --- Output waybar JSON ---

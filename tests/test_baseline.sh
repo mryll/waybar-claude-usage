@@ -7,7 +7,21 @@
 source "$(dirname "$0")/lib.sh"
 BASE_REF="${BASE_REF:-ac1f66a}"   # v0.5.0 — plain tooltip default + --frame/--frame-font
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-norm(){ sed 's/Updated [0-9][0-9]:[0-9][0-9]/Updated XX:XX/g'; }
+# Since the continuous-gradient release, tooltip colors are interpolated per
+# percentage and usage bars are colored per cell, so Pango span colors and span
+# structure intentionally differ from older refs. norm() therefore strips Pango
+# tags and compares the PLAIN-TEXT structure (text content, bar lengths, glyphs,
+# layout, class field) — still a byte-level guard for everything that was not
+# deliberately changed. Bump BASE_REF at the next release to restore full
+# byte-identity comparison.
+norm(){ sed 's/Updated [0-9][0-9]:[0-9][0-9]/Updated XX:XX/g; s/<[^>]*>//g'; }
+# Extra-usage copy and its meter intentionally changed to distinguish prepaid
+# balance from the monthly cap. Preserve the historical guard for the bar face
+# and every tooltip section before that boundary; test_extra_usage.sh owns the
+# new credit section contract itself.
+norm_before_extra(){
+    norm | jq -c '.tooltip |= (split("  󰄑  Extra usage")[0] | gsub("─+"; "─"))'
+}
 base="$(mktemp)"
 git -C "$REPO" show "$BASE_REF:claudebar" > "$base" || { echo "FATAL: cannot extract $BASE_REF:claudebar" >&2; rm -f "$base"; exit 1; }
 chmod +x "$base"
@@ -25,13 +39,25 @@ cmp_same() {  # <name> <usage> [flags...]
     [[ "$b" == "$n" ]] && _ok "$name" || _no "$name" "$(diff <(printf '%s' "$b") <(printf '%s' "$n") | head -40)"
 }
 
-for fx_name in MIN SON EXTRA BAD; do
+cmp_same_before_extra() {  # <name> <usage> [flags...]
+    local name="$1" usage="$2"; shift 2
+    SCRIPT="$base" run_claudebar "$usage" "$@"; local b; b="$(norm_before_extra <<<"$OUT")"
+    run_claudebar "$usage" "$@";               local n; n="$(norm_before_extra <<<"$OUT")"
+    [[ "$b" == "$n" ]] && _ok "$name" || _no "$name" "$(diff <(printf '%s' "$b") <(printf '%s' "$n") | head -40)"
+}
+
+for fx_name in MIN SON BAD; do
     fx="${!fx_name}"
     cmp_same "baseline $fx_name default"          "$fx"
     cmp_same "baseline $fx_name --tooltip-pace-pts" "$fx" --tooltip-pace-pts
     cmp_same "baseline $fx_name custom --format"   "$fx" --format '{session_pct}% w{weekly_pct}%'
     cmp_same "baseline $fx_name custom --tooltip-format" "$fx" --tooltip-format '{session_bar} {weekly_bar}'
 done
+
+cmp_same_before_extra "baseline EXTRA default" "$EXTRA"
+cmp_same_before_extra "baseline EXTRA --tooltip-pace-pts" "$EXTRA" --tooltip-pace-pts
+cmp_same_before_extra "baseline EXTRA custom --format" "$EXTRA" --format '{session_pct}% w{weekly_pct}%'
+cmp_same "baseline EXTRA custom --tooltip-format" "$EXTRA" --tooltip-format '{session_bar} {weekly_bar}'
 
 # --- v0.7.0 baseline: zero- and one-model limits[] payloads must render
 # byte-identically to the first model-scoped release (BASE_REF predates limits[]).

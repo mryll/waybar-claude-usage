@@ -3,40 +3,40 @@
 [![AUR version](https://img.shields.io/aur/version/claudebar)](https://aur.archlinux.org/packages/claudebar)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-Waybar widget that shows your Claude AI usage limits — session, weekly, and per-model — with colored progress bars and countdown timers.
+claudebar is a Waybar widget that shows how much of your Claude AI plan you have used. It shows the session limit, the weekly limit and the per-model limits. Each one has a progress bar, a color for the level of use, and the time until it resets.
 
 <p align="center">
-  <img src="screenshots/bar.png" alt="claudebar in Waybar" width="800">
+  <img src="screenshots/waybar-bar.png" alt="claudebar in Waybar" width="800">
 </p>
 
 <p align="center">
-  <em>A compact line in your bar — hover for the full usage breakdown:</em><br><br>
-  <img src="screenshot.png" alt="claudebar tooltip" width="800">
+  <em>A compact line in your bar. Move the pointer onto it to see all the limits:</em><br><br>
+  <img src="screenshots/waybar-tooltip.png" alt="claudebar tooltip" width="800">
 </p>
 
 ## Features
 
-- Session (5h) and weekly (7d) usage with countdown timers
-- Per-model tracking (Sonnet legacy field, plus model-scoped weekly limits like Fable) when available
-- Extra usage tracking (spending, limit, balance) when enabled
-- Pacing indicators — ratio-based and point-based, with optional per-window coloring
-- Tooltip elapsed markers — visual pacing reference in progress bars
-- Colored progress bars in tooltip (Pango markup)
-- Customizable bar text and tooltip via `--format` / `--tooltip-format` placeholders
-- Granular CSS classes (`low`, `mid`, `high`, `critical`) for bar styling
-- Response cache (60s TTL) — fast even on multi-monitor setups
-- Auto-refreshes OAuth token (no manual re-auth needed)
-- Pure Bash — no runtime dependencies beyond `curl`, `jq`, and GNU `date`
-- Works with any Waybar setup (Hyprland, Sway, etc.)
+- Session (5h) and weekly (7d) limits, each with a countdown to the reset.
+- Per-model limits, such as a weekly limit for one model, when the API reports them.
+- Extra usage: the money spent this month, the prepaid balance that is left, and the monthly limit.
+- Pace indicators that compare your use with the time that has passed.
+- A color gauge in the tooltip: green at 0%, amber in the middle, red at the top.
+- Custom bar text and tooltip text through `--format` and `--tooltip-format`.
+- CSS classes (`low`, `mid`, `high`, `critical`) for your own bar style.
+- A monochrome mode for a bar without color, with support for `NO_COLOR`.
+- A native plugin for the [Omarchy](https://omarchy.org) shell, with a usage panel that opens on a click.
+- Structured JSON output (`--json`) for other frontends.
+- Automatic refresh of the OAuth token. You do not log in again.
+- Pure Bash. The only external tools are `curl`, `jq`, GNU `date`, and the standard text tools.
 
 ## Requirements
 
-- [Claude CLI](https://github.com/anthropics/claude-code) — must be logged in (`claude` command)
-- Claude Pro or Max subscription
-- `curl`, `jq`, GNU `date` (standard on most Linux systems)
-- [Waybar](https://github.com/Alexays/Waybar)
-- A [Nerd Font](https://www.nerdfonts.com/) for tooltip icons (recommended; required only for the framed tooltip — see [Framed tooltip](#framed-tooltip))
-- (Optional) [Font Awesome](https://fontawesome.com/) ≥ 7.2.0 OTF for the Claude brand icon
+- [Claude CLI](https://github.com/anthropics/claude-code). You must be logged in with the `claude` command.
+- A Claude Pro or Max subscription.
+- `curl`, `jq` and GNU `date`. These are standard on most Linux systems.
+- [Waybar](https://github.com/Alexays/Waybar).
+- A [Nerd Font](https://www.nerdfonts.com/) for the tooltip icons. It is necessary only for the framed tooltip. Refer to [Framed tooltip](#framed-tooltip).
+- Optional: [Font Awesome](https://fontawesome.com/) 7.2.0 or later, in OTF format, for the Claude brand icon.
 
 ## Installation
 
@@ -54,19 +54,19 @@ cd claudebar
 make install PREFIX=~/.local
 ```
 
-Or system-wide:
+To install for all users:
 
 ```bash
 sudo make install
 ```
 
-To uninstall:
+To remove the widget:
 
 ```bash
 make uninstall PREFIX=~/.local
 ```
 
-### Quick install
+### One command
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/mryll/claudebar/master/claudebar \
@@ -75,7 +75,7 @@ curl -fsSL https://raw.githubusercontent.com/mryll/claudebar/master/claudebar \
 
 ## Quick start
 
-Add the module to your `~/.config/waybar/config.jsonc`:
+Add the module to your `~/.config/waybar/config.jsonc` file:
 
 ```jsonc
 "modules-right": ["custom/claudebar", ...],
@@ -91,40 +91,114 @@ Add the module to your `~/.config/waybar/config.jsonc`:
 ```
 
 > [!WARNING]
-> The usage endpoint (`/api/oauth/usage`) is undocumented and has aggressive rate limits. Intervals below 300s will likely trigger HTTP 429 errors. Even at 300s, 429s may occur during Anthropic service disruptions. When this happens, the widget falls back to cached data and shows a `⏸` indicator. See [claude-code#30930](https://github.com/anthropics/claude-code/issues/30930).
+> The OAuth usage endpoint and the prepaid-credit endpoint are not documented. The usage endpoint has strict rate limits. An interval of less than 300 seconds will usually cause HTTP 429 errors. Errors are also possible at 300 seconds if the Anthropic service has a problem. If this occurs, the widget shows the data from the cache with a `` pause sign. If the balance is not available, the widget shows it as unknown. It does not show the monthly limit in its place. Refer to [claude-code#30930](https://github.com/anthropics/claude-code/issues/30930).
+
+## Omarchy shell plugin
+
+claudebar also has a native plugin for the Quickshell bar of the [Omarchy](https://omarchy.org) shell. The plugin is in the `omarchy/` directory of this repository. The bar shows the Claude glyph and a short usage percentage. A click opens a panel with one section for each limit. The footer of the panel ends with a refresh control (󰑐), next to the time of the last update. The control stays disabled while a fetch runs.
+
+<p align="center">
+  <img src="screenshots/omarchy-panel.png" alt="The claudebar panel in the Omarchy shell" width="420">
+</p>
+
+Each section has an animated progress bar, the percentage, the countdown to the reset, and the pace indicator. Below the sections, the panel shows the extra usage and the state of the cache.
+
+Each meter paints a color gauge along its full length and fills it up to the current value. The meter reads like a thermometer against a scale. It does not change its color as one block. The CLI resolves the gauge and sends it in the `palette` field of its JSON output: the colors and also the percentages where they turn. The panel reads those stops and calculates the colors between them. Thus one change in the core moves the tooltip and the panel together. Each number takes the color of the gauge at its own value, so the number and its meter always agree.
+
+<p align="center">
+  <img src="screenshots/omarchy-bar.png" alt="The claudebar widget in the Omarchy bar" width="520">
+</p>
+
+A small dot appears next to the percentage when a limit that is *not* on the bar becomes critical (90% or more). Thus a per-model limit that is almost full still gets your attention while the bar shows a comfortable session number. Move the pointer onto the widget and a tooltip gives the name of that limit, for example `Fable only: 100%`. When there is no dot, there is no tooltip, and the panel stays the full view of the data.
+
+Mouse and keyboard controls:
+
+| Control | Result |
+|---|---|
+| Left click | Open the panel |
+| Middle click | Get new data now. This ignores the 60-second cache. |
+| Right click | Open the claude.ai usage page |
+| `r` or Enter, in the panel | Get new data now |
+
+### Install the plugin
+
+The `claudebar` command must be on your PATH. Refer to [Installation](#installation).
+
+```bash
+make install-omarchy
+```
+
+This command makes a symbolic link from the repository to `~/.config/omarchy/plugins/mryll.claudebar`. The manifest is in the root of the repository and points to `omarchy/`.
+
+Then add the widget to a bar section in `~/.config/omarchy/shell.json`:
+
+```json
+{
+  "bar": {
+    "layout": {
+      "right": [
+        { "id": "mryll.claudebar" }
+      ]
+    }
+  }
+}
+```
+
+> [!IMPORTANT]
+> The shell does not detect file changes through a symbolic link. After you edit a plugin file, run `omarchy restart shell`. A `rescanPlugins` command finds new plugins, but it does not compile the QML again.
+
+To remove the plugin, run `make uninstall-omarchy`. This removes only the symbolic link.
+
+### Plugin settings
+
+Change these settings in the settings window of the shell, or write them in the `shell.json` entry:
+
+| Setting | Type | Default | Description |
+|---|---|---|---|
+| `refreshIntervalSec` | integer (60–3600) | `300` | How often to run claudebar. The API response stays in the cache for 60 seconds. A value of less than 300 can cause API rate limits. |
+| `showLabel` | boolean | `true` | Show the short usage percentage next to the icon. Horizontal bars only. |
+| `barWindow` | `Session` \| `Weekly` | `Session` | The limit that gives the percentage on the bar. |
+| `colorMode` | `full` \| `none` \| `bar-only` \| `panel-only` | `full` | Where color is used. A monochrome surface uses only foreground tones. The numbers and the glyphs continue to show the level. This is equal to [`--no-color`](#monochrome-mode) in the CLI. |
+
+<p align="center">
+  <img src="screenshots/omarchy-panel-mono.png" alt="The claudebar panel with colorMode set to none" width="420">
+</p>
+
+> [!NOTE]
+> The Waybar mode continues to be the default mode, and it has full support. The Omarchy plugin is one more frontend on top of the same script.
 
 ## Configuration
 
 ### Icon
 
-Use `--icon` to prepend an icon to the widget text. The icon inherits the same color as the usage text.
+Use `--icon` to put an icon before the widget text. The icon takes the same color as the usage text.
 
-**Emoji:**
+An emoji:
 
 ```jsonc
 "exec": "claudebar --icon '🤖'"
 // => 🤖 42% · 1h 30m
 ```
 
-**Nerd Font glyph:**
+A Nerd Font glyph:
 
 ```jsonc
 "exec": "claudebar --icon '󰚩'"
 // => 󰚩 42% · 1h 30m
 ```
 
-**Claude brand icon** (requires [Font Awesome](https://fontawesome.com/) ≥ 7.2.0 OTF):
+The Claude brand icon. This needs [Font Awesome](https://fontawesome.com/) 7.2.0 or later in OTF format:
 
 ```jsonc
 "exec": "claudebar --icon \"<span font='Font Awesome 7 Brands'>&#xe861;</span>\""
 ```
 
 > [!NOTE]
-> On Arch Linux, install the OTF package (`sudo pacman -S otf-font-awesome`). The WOFF2 variant (`woff2-font-awesome`) does not render in Waybar due to a [Pango compatibility issue](https://github.com/Alexays/Waybar/issues/4381).
+> On Arch Linux, install the OTF package with `sudo pacman -S otf-font-awesome`. The WOFF2 package (`woff2-font-awesome`) does not work in Waybar because of a [Pango problem](https://github.com/Alexays/Waybar/issues/4381).
 
 ### Colors
 
-The bar text is colored by severity level out of the box (One Dark palette):
+The color of the bar text follows the level of use. These are the default colors, from the One Dark palette:
 
 | Class | Range | Default color |
 |---|---|---|
@@ -133,7 +207,7 @@ The bar text is colored by severity level out of the box (One Dark palette):
 | `high` | 75–89% | `#d19a66` (orange) |
 | `critical` | 90–100% | `#e06c75` (red) |
 
-To override, pass `--color-*` flags in the `exec` field:
+To use other colors, add the `--color-*` flags to the `exec` field:
 
 ```jsonc
 "custom/claudebar": {
@@ -142,21 +216,89 @@ To override, pass `--color-*` flags in the `exec` field:
 }
 ```
 
-Available flags: `--color-low`, `--color-mid`, `--color-high`, `--color-critical`.
+The four flags are `--color-low`, `--color-mid`, `--color-high` and `--color-critical`. Each one accepts a hex color (`#rgb`, `#rgba`, `#rrggbb` or `#rrggbbaa`) or a plain color name such as `red`. Other values cause an error message in the widget.
 
-CSS classes (`low`, `mid`, `high`, `critical`) are also emitted for additional styling via `~/.config/waybar/style.css`.
+In the tooltip these four colors are the **anchors of a gauge**, not four steps. Low sits at 0%, mid at 50%, high at 75%, and critical from 90% up. The script calculates all the colors between the anchors. Each progress bar paints that gauge along its own length: cell number *k* takes the color of the percentage at its position. Thus a bar goes from green to red from left to right, and the length of the fill shows your position on the scale. Each number next to a bar takes the color of the gauge at its own value.
 
-### Theming (Omarchy)
+The `class` field (`low`, `mid`, `high`, `critical`) stays at the four discrete steps above. Use it in `~/.config/waybar/style.css` for your own style.
 
-Tooltip and bar text colors are automatically read from the active [Omarchy](https://github.com/basecamp/omarchy) theme at `~/.config/omarchy/current/theme/colors.toml` on every execution. On non-Omarchy systems, the One Dark palette is used as fallback.
+### Theming (Omarchy, pywal)
 
-The priority chain is: **CLI flags** (`--color-*`) > **Omarchy theme** > **One Dark defaults**.
+The script resolves the colors of the bar and the tooltip at each execution, in this order:
 
-| Gruvbox | Catppuccin Latte | Everforest |
+| # | Source | Where |
+|---|---|---|
+| 1 | `--color-*` flags | your Waybar config |
+| 2 | [Omarchy](https://github.com/basecamp/omarchy) theme | `$XDG_STATE_HOME/omarchy/current/theme/colors.toml`, then the older `~/.config/omarchy/current/theme/colors.toml` |
+| 3 | pywal palette | `$XDG_CACHE_HOME/wal/colors.json` (usually `~/.cache/wal/colors.json`) |
+| 4 | One Dark defaults | built in |
+
+Each source fills only the colors that the sources above it did not set. Thus one `--color-critical` flag leaves the other three colors to your theme. The script reads the pywal palette **only** when there is no Omarchy theme. pywal never replaces Omarchy.
+
+> [!NOTE]
+> **Change for users of an earlier version.** The detection of the Omarchy theme did not work. The script read the path of Omarchy 3, and it also needed the old `color1` key. The result was that the tooltip used the built-in palette without a message. The colors now follow your real theme. The tooltip also has the color gauge that this page describes.
+
+pywal support makes the widget agree with a system that does not use Omarchy. The path above is the usual one. The first [pywal](https://github.com/dylanaraps/pywal) is now an archive, but the [pywal16](https://github.com/eylles/pywal16) fork writes the same file, and [wallust](https://codeberg.org/explosion-mental/wallust) has a target that is compatible with pywal. Thus the three tools work with no configuration.
+
+The script maps `special.foreground` and `special.background` to the text and the surfaces. It maps `colors.color1` to red, `color2` to green, `color3` to yellow, and `color4` (or `special.cursor`) to the accent. pywal has no slot for orange, so the script calculates orange as the middle point between yellow and red. This keeps four different steps in the gauge. A key that is not there keeps its built-in default. A value that is not a hex color is ignored. A `colors.json` file that is absent, unreadable or damaged causes no error: the script uses the One Dark colors.
+
+| Flexoki Light | Rosé Pine | Hackerman |
 |:---:|:---:|:---:|
-| ![Gruvbox](screenshots/gruvbox.png) | ![Catppuccin Latte](screenshots/catppuccin-latte.png) | ![Everforest](screenshots/everforest.png) |
+| ![Flexoki Light](screenshots/waybar-theme-flexoki-light.png) | ![Rosé Pine](screenshots/waybar-theme-rose-pine.png) | ![Hackerman](screenshots/waybar-theme-hackerman.png) |
 
-### Format customization
+| Ristretto | Nord | Kanagawa |
+|:---:|:---:|:---:|
+| ![Ristretto](screenshots/waybar-theme-ristretto.png) | ![Nord](screenshots/waybar-theme-nord.png) | ![Kanagawa](screenshots/waybar-theme-kanagawa.png) |
+
+The Omarchy plugin follows the same theme. These are three Omarchy themes in the panel:
+
+| Flexoki Light | Rosé Pine | Hackerman |
+|:---:|:---:|:---:|
+| ![Flexoki Light](screenshots/omarchy-theme-flexoki-light.png) | ![Rosé Pine](screenshots/omarchy-theme-rose-pine.png) | ![Hackerman](screenshots/omarchy-theme-hackerman.png) |
+
+| Ristretto | Nord | Kanagawa |
+|:---:|:---:|:---:|
+| ![Ristretto](screenshots/omarchy-theme-ristretto.png) | ![Nord](screenshots/omarchy-theme-nord.png) | ![Kanagawa](screenshots/omarchy-theme-kanagawa.png) |
+
+### Monochrome mode
+
+Do you prefer a bar without color? `--no-color` removes the color from all surfaces, or from one surface only:
+
+```jsonc
+"custom/claudebar": {
+    "exec": "claudebar --no-color",         // plain bar text and plain tooltip
+    // "exec": "claudebar --no-color=bar",     // plain bar, colored tooltip
+    // "exec": "claudebar --no-color=tooltip", // colored bar, plain tooltip
+    ...
+}
+```
+
+| Command | Bar text | Tooltip |
+|---|---|---|
+| *(no flag)* | color | color |
+| `--no-color` or `--no-color=all` | plain | plain |
+| `--no-color=bar` | plain | color |
+| `--no-color=tooltip` | color | plain |
+
+<p align="center">
+  <img src="screenshots/waybar-tooltip-mono.png" alt="The claudebar tooltip with --no-color" width="800">
+</p>
+
+Plain means no color markup. Nothing else changes. The progress bars, the markers, the icons, the box lines, the bold text and all the numbers stay in their positions. The flag also removes color markup that you wrote yourself in a `--format` or `--tooltip-format` value.
+
+The widget obeys the [`NO_COLOR`](https://no-color.org) environment variable. Set it to any value that is not empty and the widget operates as with `--no-color=all`. A flag is a more specific instruction than the variable, so `NO_COLOR=1 claudebar --no-color=tooltip` keeps the color in the bar text.
+
+> [!TIP]
+> **Monochrome plus CSS: make your own style.** The `class` field (`low`, `mid`, `high`, `critical`) does not change in monochrome mode. Thus you can remove the built-in colors and control the bar from your own stylesheet:
+>
+> ```css
+> #custom-claudebar.high     { color: #d79921; }
+> #custom-claudebar.critical { color: #cc241d; font-weight: bold; }
+> ```
+
+The Omarchy plugin has the same four modes in its **Colors** setting (`full`, `none`, `bar-only`, `panel-only`). Refer to the [settings table](#plugin-settings).
+
+### Bar text and tooltip text
 
 Use `--format` to control the bar text:
 
@@ -183,15 +325,15 @@ claudebar --format '{session_pct}%'
 ```
 
 > [!TIP]
-> For icons, use `--icon` (see [Icon](#icon)) instead of embedding them in `--format`. This lets you use Pango markup to select the font, which is necessary for brand icons like Font Awesome.
+> For icons, use `--icon` (refer to [Icon](#icon)). Do not put icons in `--format`. The `--icon` flag lets you select the font with Pango markup, which is necessary for brand icons such as Font Awesome.
 
-Use `--tooltip-format` for a custom plain-text tooltip (overrides the default rich tooltip):
+Use `--tooltip-format` for a tooltip of plain text. It replaces the default tooltip:
 
 ```bash
 claudebar --tooltip-format 'Session: {session_pct}% ({session_reset}) | Weekly: {weekly_pct}% ({weekly_reset})'
 ```
 
-Example Waybar config with custom format:
+A Waybar config with a custom format:
 
 ```jsonc
 "custom/claudebar": {
@@ -204,75 +346,75 @@ Example Waybar config with custom format:
 }
 ```
 
-#### Available placeholders
+#### Placeholders
 
 | Placeholder | Description | Example |
 |---|---|---|
 | `{icon}` | Claude icon (Nerd Font) | `󰚩` |
 | `{plan}` | Plan label | Max 5x |
 | `{session_pct}` | Session (5h) usage % | 42 |
-| `{session_remaining_pct}` | Session remaining % (100 − used) | 58 |
+| `{session_remaining_pct}` | Session left % (100 − used) | 58 |
 | `{session_reset}` | Session countdown | 1h 30m |
-| `{session_elapsed}` | Session time elapsed % | 58 |
-| `{session_bar}` | Session usage progress bar (Pango) | `████████░░░░░░░░░░░░` |
-| `{session_remaining_bar}` | Session remaining drain bar (Pango) | `███████████░░░░░░░░░` |
-| `{session_pace}` | Session pacing icon (ratio-based) | ↑ / ↓ / → |
-| `{session_pace_indicator}` | Session pacing icon (point-based) | ↑ / ↓ / → |
-| `{session_pace_pct}` | Session pacing deviation (ratio) | 12% ahead |
-| `{session_pace_pts}` | Session pacing deviation (points) | 5pts ahead |
-| `{session_pace_delta}` | Session pacing delta (signed) | -12 |
-| `{session_pace_abs_delta}` | Session pacing delta (unsigned) | 12 |
-| `{weekly_pct}` | Weekly (7d all models) usage % | 27 |
-| `{weekly_remaining_pct}` | Weekly remaining % (100 − used) | 73 |
+| `{session_elapsed}` | Session time that has passed, in % | 58 |
+| `{session_bar}` | Session usage bar (Pango) | `████████░░░░░░░░░░░░` |
+| `{session_remaining_bar}` | Session bar that empties (Pango) | `███████████░░░░░░░░░` |
+| `{session_pace}` | Session pace icon (ratio) | ↑ / ↓ / → |
+| `{session_pace_indicator}` | Session pace icon (points) | ↑ / ↓ / → |
+| `{session_pace_pct}` | Session pace difference (ratio) | 12% ahead |
+| `{session_pace_pts}` | Session pace difference (points) | 5pts ahead |
+| `{session_pace_delta}` | Session pace difference, with sign | -12 |
+| `{session_pace_abs_delta}` | Session pace difference, no sign | 12 |
+| `{weekly_pct}` | Weekly (7d, all models) usage % | 27 |
+| `{weekly_remaining_pct}` | Weekly left % (100 − used) | 73 |
 | `{weekly_reset}` | Weekly countdown | 4d 1h |
-| `{weekly_elapsed}` | Weekly time elapsed % | 42 |
-| `{weekly_bar}` | Weekly usage progress bar (Pango) | `█████░░░░░░░░░░░░░░░` |
-| `{weekly_remaining_bar}` | Weekly remaining drain bar (Pango) | `██████████████░░░░░░` |
-| `{weekly_pace}` | Weekly pacing icon (ratio-based) | ↑ / ↓ / → |
-| `{weekly_pace_indicator}` | Weekly pacing icon (point-based) | ↑ / ↓ / → |
-| `{weekly_pace_pct}` | Weekly pacing deviation (ratio) | 5% under |
-| `{weekly_pace_pts}` | Weekly pacing deviation (points) | 8pts under |
-| `{weekly_pace_delta}` | Weekly pacing delta (signed) | -8 |
-| `{weekly_pace_abs_delta}` | Weekly pacing delta (unsigned) | 8 |
-| `{sonnet_pct}` | Sonnet-only weekly usage % | 4 |
-| `{sonnet_remaining_pct}` | Sonnet remaining % (100 − used) | 96 |
+| `{weekly_elapsed}` | Weekly time that has passed, in % | 42 |
+| `{weekly_bar}` | Weekly usage bar (Pango) | `█████░░░░░░░░░░░░░░░` |
+| `{weekly_remaining_bar}` | Weekly bar that empties (Pango) | `██████████████░░░░░░` |
+| `{weekly_pace}` | Weekly pace icon (ratio) | ↑ / ↓ / → |
+| `{weekly_pace_indicator}` | Weekly pace icon (points) | ↑ / ↓ / → |
+| `{weekly_pace_pct}` | Weekly pace difference (ratio) | 5% under |
+| `{weekly_pace_pts}` | Weekly pace difference (points) | 8pts under |
+| `{weekly_pace_delta}` | Weekly pace difference, with sign | -8 |
+| `{weekly_pace_abs_delta}` | Weekly pace difference, no sign | 8 |
+| `{sonnet_pct}` | Sonnet weekly usage % | 4 |
+| `{sonnet_remaining_pct}` | Sonnet left % (100 − used) | 96 |
 | `{sonnet_reset}` | Sonnet countdown | 2h 24m |
-| `{sonnet_elapsed}` | Sonnet time elapsed % | 42 |
-| `{sonnet_bar}` | Sonnet usage progress bar (Pango) | `░░░░░░░░░░░░░░░░░░░░` |
-| `{sonnet_remaining_bar}` | Sonnet remaining drain bar (Pango) | `███████████████████░` |
-| `{sonnet_pace}` | Sonnet pacing icon (ratio-based) | ↑ / ↓ / → |
-| `{sonnet_pace_indicator}` | Sonnet pacing icon (point-based) | ↑ / ↓ / → |
-| `{sonnet_pace_pct}` | Sonnet pacing deviation (ratio) | 3% ahead |
-| `{sonnet_pace_pts}` | Sonnet pacing deviation (points) | 3pts ahead |
-| `{sonnet_pace_delta}` | Sonnet pacing delta (signed) | 3 |
-| `{sonnet_pace_abs_delta}` | Sonnet pacing delta (unsigned) | 3 |
-| `{model_name}` | Model-scoped limit model name¹ | Fable |
-| `{model_pct}` | Model-scoped weekly usage % | 67 |
-| `{model_remaining_pct}` | Model remaining % (100 − used) | 33 |
+| `{sonnet_elapsed}` | Sonnet time that has passed, in % | 42 |
+| `{sonnet_bar}` | Sonnet usage bar (Pango) | `░░░░░░░░░░░░░░░░░░░░` |
+| `{sonnet_remaining_bar}` | Sonnet bar that empties (Pango) | `███████████████████░` |
+| `{sonnet_pace}` | Sonnet pace icon (ratio) | ↑ / ↓ / → |
+| `{sonnet_pace_indicator}` | Sonnet pace icon (points) | ↑ / ↓ / → |
+| `{sonnet_pace_pct}` | Sonnet pace difference (ratio) | 3% ahead |
+| `{sonnet_pace_pts}` | Sonnet pace difference (points) | 3pts ahead |
+| `{sonnet_pace_delta}` | Sonnet pace difference, with sign | 3 |
+| `{sonnet_pace_abs_delta}` | Sonnet pace difference, no sign | 3 |
+| `{model_name}` | Name of the model with its own limit¹ | Fable |
+| `{model_pct}` | Model weekly usage % | 67 |
+| `{model_remaining_pct}` | Model left % (100 − used) | 33 |
 | `{model_reset}` | Model countdown | 1d 19h |
-| `{model_elapsed}` | Model time elapsed % | 42 |
-| `{model_bar}` | Model usage progress bar (Pango) | `█████████████░░░░░░░` |
-| `{model_remaining_bar}` | Model remaining drain bar (Pango) | `██████░░░░░░░░░░░░░░` |
-| `{model_pace}` | Model pacing icon (ratio-based) | ↑ / ↓ / → |
-| `{model_pace_indicator}` | Model pacing icon (point-based) | ↑ / ↓ / → |
-| `{model_pace_pct}` | Model pacing deviation (ratio) | 3% ahead |
-| `{model_pace_pts}` | Model pacing deviation (points) | 3pts ahead |
-| `{model_pace_delta}` | Model pacing delta (signed) | 3 |
-| `{model_pace_abs_delta}` | Model pacing delta (unsigned) | 3 |
-| `{extra_spent}` | Extra usage spent | $2.50 |
-| `{extra_limit}` | Extra usage monthly limit | $50.00 |
-| `{extra_pct}` | Extra usage spent % | 5 |
-| `{extra_bar}` | Extra usage progress bar (Pango) | `█░░░░░░░░░░░░░░░░░░░` |
+| `{model_elapsed}` | Model time that has passed, in % | 42 |
+| `{model_bar}` | Model usage bar (Pango) | `█████████████░░░░░░░` |
+| `{model_remaining_bar}` | Model bar that empties (Pango) | `██████░░░░░░░░░░░░░░` |
+| `{model_pace}` | Model pace icon (ratio) | ↑ / ↓ / → |
+| `{model_pace_indicator}` | Model pace icon (points) | ↑ / ↓ / → |
+| `{model_pace_pct}` | Model pace difference (ratio) | 3% ahead |
+| `{model_pace_pts}` | Model pace difference (points) | 3pts ahead |
+| `{model_pace_delta}` | Model pace difference, with sign | 3 |
+| `{model_pace_abs_delta}` | Model pace difference, no sign | 3 |
+| `{extra_spent}` | Extra usage, money spent | $2.50 |
+| `{extra_limit}` | Extra usage, monthly limit | $50.00 |
+| `{extra_pct}` | Money spent as a % of spend plus prepaid balance. Empty if the balance is unknown. | 20 |
+| `{extra_bar}` | Bar of the real funded credit. Empty if the balance is unknown. | `████░░░░░░░░░░░░░░░░` |
 
 > [!NOTE]
-> ¹ When the API reports several model-scoped limits, the tooltip shows one section per model; `{model_*}` placeholders refer to the first.
+> ¹ If the API reports more than one model limit, the tooltip shows one section for each model. The `{model_*}` placeholders refer to the first model.
 
 > [!NOTE]
-> Bar placeholders are colored by their own window's usage thresholds (low/mid/high/critical), independently of the surrounding bar text color, which reflects the worst window overall. A `{session_bar}` can render green while the surrounding text is red because weekly, sonnet, or a model-scoped limit hit the critical threshold.
+> Each bar placeholder takes its color from its own limit, not from the text around it. The text around it shows the highest of all the limits. Thus `{session_bar}` can be green while the text is red, because the weekly, the sonnet or a model limit is critical.
 
 ### Remaining mode
 
-Use `--remaining` to flip the default bar text and tooltip to a "what's left" (battery) framing:
+Use `--remaining` to show what is left, as a battery does, in the default bar text and in the tooltip:
 
 ```bash
 # Default (usage framing)
@@ -284,28 +426,28 @@ claudebar --remaining
 # => 58% · 1h 30m
 ```
 
-The tooltip header gains a `· Remaining` suffix, and the default bar text becomes `{session_remaining_pct}% · {session_reset}`. This flag is opt-in and fully backward compatible — it only changes the default format and tooltip header; custom `--format` / `--tooltip-format` values are unaffected.
+The tooltip header gets a `· Remaining` suffix, and the default bar text becomes `{session_remaining_pct}% · {session_reset}`. The flag changes only the default format and the tooltip header. Your own `--format` and `--tooltip-format` values do not change.
 
-The `{*_remaining_pct}` and `{*_remaining_bar}` placeholders are available regardless of this flag and can be used in any custom format.
+The `{*_remaining_pct}` and `{*_remaining_bar}` placeholders are available with or without this flag.
 
-### Pacing indicators
+### Pace indicators
 
-Pacing compares your actual usage against where you "should" be if you spread your quota evenly across the window. It answers: "at this rate, will I run out before the window resets?"
+The pace compares your use with the time that has passed in the limit period. It answers this question: at this rate, will the quota end before the reset?
 
-- **↑** — ahead of pace (using faster than sustainable)
-- **→** — on track
-- **↓** — under pace (plenty of room left)
+- **↑** — ahead of the pace. You use the quota faster than the time.
+- **→** — on the pace.
+- **↓** — behind the pace. Much of the quota is left.
 
-**How it works:** if 30% of the session time has elapsed, you "should" have used ~30% of your quota. The widget divides your actual usage by the expected usage and flags deviations beyond a tolerance band:
+If 30% of the session time has passed, an even use is 30% of the quota. The script divides your real use by that expected use, and shows a difference that is larger than a tolerance band:
 
-| Scenario | Time elapsed | Usage | Pacing | Icon |
+| Example | Time passed | Use | Pace | Icon |
 |---|---|---|---|---|
-| Burning through quota | 25% | 60% | 140% ahead | ↑ |
-| Slightly ahead | 50% | 52% | on track (within tolerance) | → |
-| Perfectly even | 50% | 50% | on track | → |
-| Conserving | 70% | 30% | 57% under | ↓ |
+| Very fast use | 25% | 60% | 140% ahead | ↑ |
+| A little ahead | 50% | 52% | on the pace (in the band) | → |
+| Fully even | 50% | 50% | on the pace | → |
+| Slow use | 70% | 30% | 57% under | ↓ |
 
-By default the tolerance is **±5%** — deviations of 5% or less show as "on track" to avoid noise. You can tune it with `--pace-tolerance`:
+The default band is **±5%**. A difference of 5% or less shows as "on track". Change the band with `--pace-tolerance`:
 
 ```bash
 # More sensitive (±2%) — flags smaller deviations
@@ -315,26 +457,26 @@ claudebar --pace-tolerance 2
 claudebar --pace-tolerance 10
 ```
 
-The `{session_pace_pct}` / `{weekly_pace_pct}` placeholders show the deviation (e.g. "12% ahead", "5% under", "on track").
+The `{session_pace_pct}` and `{weekly_pace_pct}` placeholders show the difference, for example "12% ahead", "5% under" or "on track".
 
-#### Point-based pacing
+#### Pace in points
 
-In addition to ratio-based pacing, there's a point-based alternative that computes `actual_usage - expected_usage`. At 22% usage with 78% elapsed, the delta is -56 — intuitive and stable across the window.
+There is a second calculation in points: real use minus expected use. At 22% use with 78% of the time passed, the difference is -56 points. This number is easy to read and it is stable during the period.
 
 | Placeholder | Type | Example | Description |
 |---|---|---|---|
-| `{*_pace}` | Ratio | ↑ | Icon with tolerance band (±5% default) |
-| `{*_pace_indicator}` | Points | ↑ | Icon without tolerance (any non-zero = ↑/↓) |
-| `{*_pace_pct}` | Ratio | 12% ahead | Ratio-based deviation label |
-| `{*_pace_pts}` | Points | 5pts ahead | Point-based deviation label |
-| `{*_pace_delta}` | Points | -12 | Signed integer delta |
-| `{*_pace_abs_delta}` | Points | 12 | Unsigned integer delta |
+| `{*_pace}` | Ratio | ↑ | Icon with a tolerance band (±5% default) |
+| `{*_pace_indicator}` | Points | ↑ | Icon with no band (any value that is not zero) |
+| `{*_pace_pct}` | Ratio | 12% ahead | Difference as a ratio |
+| `{*_pace_pts}` | Points | 5pts ahead | Difference in points |
+| `{*_pace_delta}` | Points | -12 | Integer with sign |
+| `{*_pace_abs_delta}` | Points | 12 | Integer with no sign |
 
-Replace `*` with `session`, `weekly`, `sonnet`, or `model`.
+Replace `*` with `session`, `weekly`, `sonnet` or `model`.
 
-### Per-window pace coloring
+### One color for each pace
 
-Use `--format-pace-color` to color pace placeholders individually per window based on their point delta, instead of the global usage-based color:
+Use `--format-pace-color` to give each pace placeholder its own color from its point difference. Without this flag, the usage color applies to all the bar text.
 
 ```bash
 claudebar --format-pace-color \
@@ -342,18 +484,16 @@ claudebar --format-pace-color \
 # => ↑4·↓10  (↑4 in orange, ↓10 in green, · in neutral)
 ```
 
-| Delta | Color | Meaning |
+| Difference | Color | Meaning |
 |---|---|---|
-| ≤ -10 | Green | Well under pace |
-| -10 to 0 | Yellow | Slightly under or on pace |
-| 1 to 9 | Orange | Slightly ahead |
-| ≥ 10 | Red | Burning fast |
+| ≤ -10 | Green | Much slower than the pace |
+| -10 to 0 | Yellow | A little slower, or on the pace |
+| 1 to 9 | Orange | A little ahead |
+| ≥ 10 | Red | Very fast use |
 
-Without this flag, the entire bar text is colored by usage percentage — identical to the default behavior.
+### Markers in the tooltip
 
-### Tooltip elapsed markers
-
-Use `--tooltip-pace-pts` to add an elapsed marker (`█`) to each tooltip progress bar, showing where even pacing would put you:
+Use `--tooltip-pace-pts` to add a marker (`█`) to each progress bar in the tooltip. The marker shows the position of an even pace:
 
 ```
 Without --tooltip-pace-pts:
@@ -366,25 +506,25 @@ With --tooltip-pace-pts:
                   ^ marker at 32% (even pace position)
 ```
 
-The marker color adapts to the active theme. Without this flag, the tooltip is unchanged.
+The color of the marker follows the active theme. Without this flag, the tooltip does not change.
 
 ### Framed tooltip
 
-By default the tooltip is **plain** (no border) and renders in your Waybar font, so it looks right with any font. Pass `--frame` to draw the bordered "card" instead:
+The default tooltip is **plain**, with no border, and it uses your Waybar font. Thus it looks correct with all fonts. Use `--frame` to draw the tooltip as a card with a border:
 
 ```bash
 claudebar --frame
 ```
 
-Framed mode pins `JetBrainsMono Nerd Font Mono` **by default** so the box, bars and icons stay aligned regardless of your bar font. Don't have it (or prefer another)? Point `--frame-font` at any complete Mono Nerd Font you already have:
+The framed tooltip uses `JetBrainsMono Nerd Font Mono` by default. This keeps the box, the bars and the icons in line, whichever font your bar uses. If you do not have that font, or if you prefer a different one, give `--frame-font` a name. Use any complete Mono Nerd Font on your system:
 
 ```bash
 claudebar --frame --frame-font "FiraCode Nerd Font Mono"
 ```
 
-### Spacing
+### Space around the widget
 
-Adjust `padding` (inside the widget) and `margin` (outside the widget) in `~/.config/waybar/style.css`:
+Set `padding` (inside the widget) and `margin` (outside the widget) in `~/.config/waybar/style.css`:
 
 ```css
 #custom-claudebar {
@@ -393,29 +533,53 @@ Adjust `padding` (inside the widget) and `margin` (outside the widget) in `~/.co
 }
 ```
 
+## Structured JSON output
+
+`claudebar --json` writes one JSON object of raw data to stdout. The object has numbers, ISO-8601 times and state words. It has no Pango markup and no colors, so any frontend can show it. This is the interface between the script and the Omarchy plugin, and it is available to your own tools.
+
+```bash
+claudebar --json | jq .session
+claudebar --json --refresh   # force a fresh API fetch
+```
+
+The object has `schema_version: 1` and the plan label. It also has the `session`, `weekly` and `sonnet` limits, a `models` array with the model limits, `extra_usage`, `overall`, `cache` information and an `error` field. State words are `low`, `mid`, `high` and `critical` for use, and `under`, `on_pace`, `ahead` and `hot` for pace.
+
+In `extra_usage`, `used_credit_cents` is the money spent this month, `available_credit_cents` is the exact prepaid balance, and `monthly_limit_cents` is only a safety limit. `funded_credit_cents` is the spend plus the balance. Thus `used_pct` and the meter measure the real money, not the monthly limit. The fields that come from the balance are `null` when the separate ledger endpoint is not available. One exception: the explicit `out_of_credits` state of Claude means a balance of zero.
+
+The `palette` field carries the color gauge. `palette.stops` is the gauge itself: `[{"pct": 0, "color": "#…"}, …]`, the anchor colors and also the percentages where they turn. A frontend calculates the colors between the stops and gets the same green-to-red gauge that the tooltip has. A change to a threshold in the script moves every frontend with it. The `palette.low`, `palette.mid`, `palette.high` and `palette.critical` fields are short names for the same four anchors.
+
+> [!NOTE]
+> The script always exits with code 0, in JSON mode also. Waybar hides a module that exits with an error, so a problem is data in the `error` field, not an exit code.
+
 ## How it works
 
-1. Reads OAuth credentials from `~/.claude/.credentials.json` (created by Claude CLI)
-2. Auto-refreshes the access token if it expires within 5 minutes
-3. Calls `api.anthropic.com/api/oauth/usage` for live usage data (cached for 60s)
-4. Outputs JSON with `text`, `tooltip` (Pango markup), and `class` for Waybar
+1. The script reads the OAuth credentials from `~/.claude/.credentials.json`. The Claude CLI writes that file.
+2. It refreshes the access token if the token expires in less than 5 minutes.
+3. It calls `api.anthropic.com/api/oauth/usage` for the usage data.
+4. It writes JSON with the `text`, `tooltip` and `class` fields for Waybar.
 
-The tooltip shows colored progress bars for each usage window (session, weekly, per-model when reported) with countdown timers, time elapsed, and pacing info. Colors change from green → yellow → orange → red as usage increases.
+The tooltip shows a progress bar for each limit, with the countdown, the time that has passed and the pace. Each bar paints the green-to-red gauge along its length and fills it up to the current value.
 
 ### Cache
 
-API responses are cached in `~/.cache/claudebar/usage.json` for 60 seconds. This keeps the widget fast (~40ms from cache vs ~1s from API), which matters if you run multiple Waybar instances (e.g. multi-monitor).
+The script keeps the API response in `~/.cache/claudebar/usage.json` for 60 seconds. The cache makes the widget fast: about 40 ms from the cache, against about 1 second from the API. This is important if you run more than one Waybar instance, for example with more than one monitor. A lock makes the instances share one API call.
 
 ## Troubleshooting
 
-| Bar shows | Meaning | Fix |
+| The bar shows | Meaning | What to do |
 |---|---|---|
-| `󰚩` ↻ | Syncing | Normal at boot — data appears on next refresh |
-| `󰚩` ⚠ | Auth error | Run `claude` to log in |
-| `󰚩` ⚠ | Token expired | Run `claude` to re-authenticate |
-| `󰚩` ⏸ | Stale data (API rate-limited) | Cached data is shown; resolves automatically |
-| `󰚩` ⚠ | API error | Check your internet connection |
-| Nothing | Module not loaded | Check Waybar config and restart Waybar |
+| `󰚩` | The script is getting the first data | This is normal at start. The data appears at the next refresh. |
+| `󰚩` ⚠ | Authentication error | Run `claude` to log in |
+| `󰚩` ⚠ | The token has expired | Run `claude` to log in again |
+| `󰚩`  | Old data. The API applied a rate limit. | The widget shows the data from the cache. This corrects itself. |
+| `󰚩` ⚠ | API error | Examine your internet connection |
+| Nothing | The module did not start | Examine the Waybar config and start Waybar again |
+
+**The tooltip does not use my Omarchy theme.** Examine `$XDG_STATE_HOME/omarchy/current/theme/colors.toml`. If your shell does not set `XDG_STATE_HOME`, the file is at `~/.local/state/omarchy/current/theme/colors.toml`. A claudebar version from before the fix above reads only the older path.
+
+**The panel does not show my changes to a plugin file.** Run `omarchy restart shell`. The shell does not compile the QML again after a `rescanPlugins` command.
+
+**The bar text has no color, and I did not ask for that.** Examine the `NO_COLOR` environment variable. Any value that is not empty operates as `--no-color=all`.
 
 ## Related
 
@@ -423,7 +587,7 @@ API responses are cached in `~/.cache/claudebar/usage.json` for 60 seconds. This
 - [logibar](https://github.com/mryll/logibar) — Logitech battery widgets for Waybar
 - [meteobar](https://github.com/mryll/meteobar) — Weather widget for Waybar (Open-Meteo)
 - [tickerbar](https://github.com/mryll/tickerbar) — Multi-market price ticker for Waybar (crypto, stocks, forex)
-- [ClaudeBar](https://github.com/andresreibel/ClaudeBar) — Similar widget using TypeScript/Bun
-- [waybar-ai-usage](https://github.com/NihilDigit/waybar-ai-usage) — Claude + Codex monitor (Python, uses browser cookies)
-- [Omarchy](https://github.com/basecamp/omarchy) — Beautiful, modern & opinionated Linux distribution
+- [ClaudeBar](https://github.com/andresreibel/ClaudeBar) — Similar widget in TypeScript and Bun
+- [waybar-ai-usage](https://github.com/NihilDigit/waybar-ai-usage) — Claude and Codex monitor (Python, uses browser cookies)
+- [Omarchy](https://github.com/basecamp/omarchy) — Beautiful, modern and opinionated Linux distribution
 - [Waybar](https://github.com/Alexays/Waybar) — Status bar for Wayland compositors

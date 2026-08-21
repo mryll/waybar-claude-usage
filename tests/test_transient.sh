@@ -39,7 +39,7 @@ _run_transient() {
         now)    touch "$THOME/.cache/claudebar/.net_wait" ;;
         future) touch -d "@$(( now + 3600 ))" "$THOME/.cache/claudebar/.net_wait" ;;
     esac
-    OUT=$(HOME="$THOME" PATH="$THOME/bin:$PATH" "$SCRIPT"); RC=$?
+    OUT=$(run_pinned "$THOME" "$SCRIPT"); RC=$?
     return 0
 }
 
@@ -60,8 +60,8 @@ _run_transient "$COUNT_FAIL_STUB" old
 assert_exit0       "boot-like w/ cache: exit 0"
 assert_json_valid  "boot-like w/ cache: valid JSON"
 assert_text_has    "boot-like w/ cache: shows cached pct" "42%"
-assert_text_has    "boot-like w/ cache: shows ⏸" "⏸"
-assert_tip_has     "boot-like w/ cache: tooltip explains" "Waiting for network"
+assert_text_has    "boot-like w/ cache: shows the pause mark" ""
+assert_tip_has     "boot-like w/ cache: tooltip explains" "stale (waiting for network)"
 assert_no_stale    "boot-like w/ cache: no .stale on disk"
 assert_net_wait    "boot-like w/ cache: .net_wait episode marker written"
 _c=$(curl_calls)
@@ -82,7 +82,7 @@ rm -rf "$THOME"
 # --- Sibling: recent .net_wait -> exactly one attempt, no sleeps ---
 _run_transient "$COUNT_FAIL_STUB" old now
 assert_exit0       "sibling w/ marker: exit 0"
-assert_text_has    "sibling w/ marker: shows ⏸" "⏸"
+assert_text_has    "sibling w/ marker: shows the pause mark" ""
 assert_no_stale    "sibling w/ marker: no .stale on disk"
 _c=$(curl_calls)
 [[ "$_c" -eq 1 ]] && _ok "sibling w/ marker: exactly one attempt" || _no "sibling w/ marker: exactly one attempt" "calls=$_c"
@@ -98,7 +98,7 @@ rm -rf "$THOME"
 # --- Mid-session blip: young cache -> quick budget, NO episode marker ---
 _run_transient "$COUNT_FAIL_STUB" young
 assert_exit0       "young cache: exit 0"
-assert_text_has    "young cache: shows ⏸" "⏸"
+assert_text_has    "young cache: shows the pause mark" ""
 assert_no_stale    "young cache: no .stale on disk"
 assert_no_net_wait "young cache: no .net_wait (quick budget)"
 rm -rf "$THOME"
@@ -107,7 +107,7 @@ rm -rf "$THOME"
 _run_transient "$COUNT_FAIL_STUB" future
 assert_exit0       "future cache: exit 0"
 assert_text_has    "future cache: shows cached pct" "42%"
-assert_text_has    "future cache: shows ⏸" "⏸"
+assert_text_has    "future cache: shows the pause mark" ""
 assert_net_wait    "future cache: treated as boot-like"
 rm -rf "$THOME"
 
@@ -143,8 +143,8 @@ _run_transient "$HARD_STUB" old
 assert_exit0       "hard 500: exit 0"
 assert_json_valid  "hard 500: valid JSON"
 assert_text_has    "hard 500: shows cached pct" "42%"
-assert_text_has    "hard 500: shows ⏸" "⏸"
-assert_tip_has     "hard 500: tooltip explains" "Stale — data from"
+assert_text_has    "hard 500: shows the pause mark" ""
+assert_tip_has     "hard 500: tooltip explains" "stale (API errors)"
 [[ -f "$THOME/.cache/claudebar/.stale" ]] && _ok "hard 500: .stale persisted" || _no "hard 500: .stale persisted" "marker missing"
 [[ -f "$THOME/.cache/claudebar/.last_error" ]] && _ok "hard 500: .last_error written" || _no "hard 500: .last_error written" "file missing"
 rm -rf "$THOME"

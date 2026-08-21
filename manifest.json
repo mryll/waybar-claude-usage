@@ -1,0 +1,71 @@
+{
+  "schemaVersion": 1,
+  "id": "mryll.claudebar",
+  "name": "Claude Usage",
+  "version": "1.0.0",
+  "author": "mryll",
+  "license": "MIT",
+  "description": "Claude AI plan usage (claudebar) in the Omarchy bar: session, weekly, and per-model limits with pacing.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "omarchy/BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Claude Usage",
+    "description": "Click: usage panel. Middle click: force refresh. Right click: open the claude.ai usage page.",
+    "category": "AI",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "refreshIntervalSec": 300,
+      "showLabel": true,
+      "colorMode": "full",
+      "barWindow": "Session"
+    },
+    "schema": [
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Refresh interval (seconds)",
+        "description": "How often to run claudebar. The API response is cached for 60s; intervals below 300s may hit API rate limits.",
+        "min": 60,
+        "max": 3600,
+        "step": 30,
+        "defaultValue": 300
+      },
+      {
+        "key": "showLabel",
+        "type": "boolean",
+        "label": "Show usage % on the bar",
+        "description": "Show a compact usage percentage next to the icon (horizontal bars only).",
+        "defaultValue": true
+      },
+      {
+        "key": "colorMode",
+        "type": "enum",
+        "label": "Colors",
+        "description": "Monochrome rendering uses foreground tones only. Severity stays readable through the numbers and glyphs.",
+        "options": [
+          "full",
+          "none",
+          "bar-only",
+          "panel-only"
+        ],
+        "defaultValue": "full"
+      },
+      {
+        "key": "barWindow",
+        "type": "enum",
+        "label": "Bar label window",
+        "description": "Which usage window drives the percentage shown on the bar.",
+        "options": [
+          "Session",
+          "Weekly"
+        ],
+        "defaultValue": "Session"
+      }
+    ]
+  }
+}

@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+# demo-data — impersonates `claudebar` with a fixed, plausible payload, for
+# README screenshots. Put this directory first on PATH and every frontend (the
+# Waybar module, the Omarchy plugin) renders the demo day instead of the real
+# account:
+#
+#   PATH="$PWD/screenshots/demo:$PATH" claudebar
+#   PATH="$PWD/screenshots/demo:$PATH" claudebar --json
+#
+# It does not reimplement any rendering: it builds a throwaway HOME holding the
+# API documents the real script would have cached, then runs the real script
+# against it. So bar text, tooltip, --json, --no-color, --remaining, theme and
+# pywal resolution all behave exactly as in production — this only substitutes
+# the data. Nothing here is wired into the build, the install target or the
+# test suite.
+#
+# Optional switches (default: a healthy, fresh document):
+#   CLAUDEBAR_DEMO_ERROR=429            show the API-error card (code[:message])
+#   CLAUDEBAR_DEMO_STALE=1              show the stale/⏸ footer instead of "Updated"
+set -euo pipefail
+
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+real="$here/../../claudebar"
+if [[ ! -x "$real" ]]; then
+    printf '{"text":"demo-data: cannot find ../../claudebar","tooltip":"Run it from inside the repo.","class":"critical"}\n'
+    exit 0
+fi
+
+# Theme and pywal lookups should still see the real desktop — a screenshot is
+# supposed to look like the reader's shell — so only HOME is redirected.
+: "${XDG_STATE_HOME:=$HOME/.local/state}"
+: "${XDG_CACHE_HOME:=$HOME/.cache}"
+export XDG_STATE_HOME XDG_CACHE_HOME
+
+demo_home=$(mktemp -d) || exit 0
+trap 'rm -rf "$demo_home"' EXIT
+mkdir -p "$demo_home/.claude" "$demo_home/.cache/claudebar" "$demo_home/bin"
+
+# Nothing may reach the network: every document below is already "cached", and
+# a stub makes that structural rather than a matter of timing.
+printf '#!/usr/bin/env bash\nexit 1\n' > "$demo_home/bin/curl"
+chmod +x "$demo_home/bin/curl"
+
+# Generic plan, far-future expiry so no token refresh is attempted. No account
+# identifiers anywhere: the plan label is all the widget reads.
+printf '%s' '{"claudeAiOauth":{"accessToken":"demo","refreshToken":"demo",
+  "expiresAt":4102444800000,"subscriptionType":"max","rateLimitTier":"default_claude_5x"}}' \
+  > "$demo_home/.claude/.credentials.json"
+
+# --- The demo day -----------------------------------------------------------
+#
+# Resets are computed from *now*, so countdowns, elapsed markers and pacing all
+# render live. The spread is deliberate: one window in each band of the gauge,
+# and one window in each pacing state.
+#
+#   window        usage  elapsed  band      pacing
+#   Session         34%     ~56%  green     under      (plenty of room left)
+#   Weekly          58%     ~54%  amber     ahead      (slightly hot)
+#   Sonnet          50%     ~54%  amber     on pace
+#   Opus            78%     ~54%  orange    hot
+#   Fable          100%     ~54%  red       hot        (drives the alarm dot)
+#   Extra usage     75%        —  orange               ($37.50 of $50 funded)
+now=$(date +%s)
+iso() { date -u -d "@$(( now + $1 ))" +%Y-%m-%dT%H:%M:%S+00:00; }
+session_reset=$(iso $(( 2 * 3600 + 10 * 60 )))   # 2h 10m  -> ~56% of the 5h window
+weekly_reset=$(iso $(( 3 * 86400 + 4 * 3600 )))  # 3d 4h   -> ~54% of the 7d window
+
+jq -n \
+  --arg session_reset "$session_reset" \
+  --arg weekly_reset "$weekly_reset" \
+  '{
+     five_hour:        { utilization: 34, resets_at: $session_reset },
+     seven_day:        { utilization: 58, resets_at: $weekly_reset },
+     seven_day_sonnet: { utilization: 50, resets_at: $weekly_reset },
+     limits: [
+       { kind: "weekly_scoped", percent: 78,  resets_at: $weekly_reset,
+         scope: { model: { display_name: "Opus" } } },
+       { kind: "weekly_scoped", percent: 100, resets_at: $weekly_reset,
+         scope: { model: { display_name: "Fable" } } }
+     ],
+     extra_usage: { is_enabled: true, used_credits: 3750, monthly_limit: 20000 }
+   }' > "$demo_home/.cache/claudebar/usage.json"
+
+# The prepaid ledger is a separate endpoint, cached separately: $12.50 left of
+# the $50 funded, which is what makes the credit section show a real balance
+# instead of "unknown" — and keeps it distinct from the $200 monthly cap.
+printf '{"amount":1250}' > "$demo_home/.cache/claudebar/credits.json"
+
+# Both documents must read as fresh, or the widget renders its stale form.
+touch "$demo_home/.cache/claudebar/usage.json" "$demo_home/.cache/claudebar/credits.json"
+
+if [[ -n "${CLAUDEBAR_DEMO_ERROR:-}" ]]; then
+    demo_code="${CLAUDEBAR_DEMO_ERROR%%:*}"
+    demo_msg="${CLAUDEBAR_DEMO_ERROR#*:}"
+    [[ "$demo_msg" == "$CLAUDEBAR_DEMO_ERROR" ]] && demo_msg="Rate limited. Please try again later."
+    printf '%s\n%s' "$demo_code" "$demo_msg" > "$demo_home/.cache/claudebar/.last_error"
+fi
+[[ -n "${CLAUDEBAR_DEMO_STALE:-}" ]] && touch "$demo_home/.cache/claudebar/.stale"
+
+# Run the real renderer against the demo tree. Not exec'd, so the trap still
+# cleans up; claudebar always exits 0 by design.
+HOME="$demo_home" PATH="$demo_home/bin:$PATH" "$real" "$@"
