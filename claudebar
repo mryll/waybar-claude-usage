@@ -3,11 +3,14 @@
 # Reads OAuth credentials from Claude CLI, shows session/weekly limits
 # with colored progress bars and Pango markup tooltip.
 #
-# Usage: claudebar [--icon ICON] [--format FORMAT] [--tooltip-format FORMAT] [--pace-tolerance N]
-#                  [--format-pace-color] [--tooltip-pace-pts] [--remaining]
+# Usage: claudebar [--help] [--icon ICON] [--format FORMAT] [--tooltip-format FORMAT]
+#                  [--pace-tolerance N] [--format-pace-color] [--tooltip-pace-pts] [--remaining]
+#                  [--frame] [--frame-font FONT] [--no-color[=all|bar|tooltip]]
 #                  [--color-low HEX] [--color-mid HEX] [--color-high HEX] [--color-critical HEX]
 #                  [--json] [--refresh]
 #
+# --help     Print this reference — usage, flags and format placeholders — and
+#            exit 0. Also accepted as -h.
 # --json     Structured output mode: emits one raw-data JSON object (numbers,
 #            ISO-8601 timestamps, state strings — no Pango markup) instead of
 #            Waybar JSON. For frontends that render their own UI, e.g. the
@@ -19,6 +22,9 @@
 #            See README "Structured JSON output".
 # --refresh  Bypass the 60s response cache and fetch fresh data from the API
 #            (the result still updates the cache for other instances).
+# --frame    Draw the tooltip as a bordered card instead of plain text. The box
+#            is built from Nerd Font glyphs; --frame-font FONT names the font
+#            Pango uses for them when the Waybar font has no box drawing.
 # --no-color[=all|bar|tooltip]
 #            Monochrome output: no color markup on the chosen surface (default
 #            "all"). Everything structural stays — glyphs, bar characters,
@@ -28,7 +34,7 @@
 #            --no-color=all; an explicit flag wins over it.
 #
 # Format placeholders:
-#   {icon}              󰚩 icon (Nerd Font)
+#   {icon}              Widget mark, Nerd Font (󰚩)
 #   {plan}              Plan label (e.g. "Max 5x")
 #   {session_pct}       Session (5h) usage %
 #   {session_reset}     Session countdown (e.g. "1h 30m")
@@ -89,11 +95,11 @@
 #   {model_remaining_bar}     Model-scoped remaining drain bar
 #
 # Default format: "{session_pct}% · {session_reset}"
+# Note: bar placeholders are colored by their own window's usage, independent of
+#       the surrounding bar text color (which reflects the worst window).
 # --remaining flips the default bar text + tooltip to a "what's left" framing
 #   (e.g. "58% · 1h 30m"); {*_remaining_pct} and {*_remaining_bar} are
 #   available regardless of this flag. Fully backward compatible; opt-in.
-# Note: bar placeholders are colored by their own window's usage, independent of
-#       the surrounding bar text color (which reflects the worst window).
 
 set -euo pipefail
 
@@ -168,8 +174,21 @@ valid_color_spec() {
     is_hex_color "$1" || [[ "$1" =~ ^[A-Za-z][A-Za-z0-9]*$ ]]
 }
 
+# --help / -h: the reference the user needs is already the header comment of
+# this file, so print that rather than a second copy that can drift from it.
+# The block runs from the "# Usage:" line to the first line that is not a
+# comment, with the leading "# " stripped. Plain text on stdout, exit 0 —
+# --json does not apply: a human asked.
+show_help() {
+    awk '/^# Usage:/ { p = 1 }
+         p && !/^#/  { exit }
+         p           { sub(/^#( |$)/, ""); print }' "${BASH_SOURCE[0]}"
+    exit 0
+}
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --help|-h) show_help ;;
         --icon)
             [[ $# -ge 2 ]] || cli_error "--icon requires a value"
             BAR_ICON="$2"; shift 2 ;;
@@ -199,16 +218,16 @@ while [[ $# -gt 0 ]]; do
         --frame-font) [[ $# -ge 2 ]] || cli_error "--frame-font requires a value"
                       FRAME_FONT="$2"; shift 2 ;;
         --color-low)       [[ $# -ge 2 ]] || cli_error "--color-low requires a value"
-                           valid_color_spec "$2" || cli_error "--color-low must be a hex color or a plain color name"
+                           valid_color_spec "$2" || cli_error "--color-low must be a hex color (#RGB/#RRGGBB) or a color name"
                            BAR_COLOR_LOW="$2"; shift 2 ;;
         --color-mid)       [[ $# -ge 2 ]] || cli_error "--color-mid requires a value"
-                           valid_color_spec "$2" || cli_error "--color-mid must be a hex color or a plain color name"
+                           valid_color_spec "$2" || cli_error "--color-mid must be a hex color (#RGB/#RRGGBB) or a color name"
                            BAR_COLOR_MID="$2"; shift 2 ;;
         --color-high)      [[ $# -ge 2 ]] || cli_error "--color-high requires a value"
-                           valid_color_spec "$2" || cli_error "--color-high must be a hex color or a plain color name"
+                           valid_color_spec "$2" || cli_error "--color-high must be a hex color (#RGB/#RRGGBB) or a color name"
                            BAR_COLOR_HIGH="$2"; shift 2 ;;
         --color-critical)  [[ $# -ge 2 ]] || cli_error "--color-critical requires a value"
-                           valid_color_spec "$2" || cli_error "--color-critical must be a hex color or a plain color name"
+                           valid_color_spec "$2" || cli_error "--color-critical must be a hex color (#RGB/#RRGGBB) or a color name"
                            BAR_COLOR_CRITICAL="$2"; shift 2 ;;
         *) cli_error "Unknown option: $1" ;;
     esac
@@ -537,9 +556,13 @@ loading_network() {
     fi
     jq -nc \
         --arg t "${BAR_ICON:+${BAR_ICON} }Loading…" \
-        --arg tip "Waiting for network — no cached usage yet.\nWill retry shortly." \
+        --arg tip $'Waiting for network — no cached usage yet.\nWill retry shortly.' \
         '{text:$t, tooltip:$tip, class:"low"}'
     exit 0
+}
+
+pango_escape() {
+    sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g' <<< "${1:-}"
 }
 
 # Strip color from Pango markup while keeping everything structural: only the
@@ -657,13 +680,15 @@ pace_color_for() {
 }
 
 # Per-cell gradient colors for bar fills, precomputed once per run: the ramp
-# is a fixed function of cell position (cell k sits at k*100/(BAR_LEN-1)
-# percent, so a full bar sweeps low → critical anchor to anchor).
+# is a fixed function of cell position. Cell k covers the bucket
+# [k*5, (k+1)*5) and takes the color of its CENTRE, which is the honest
+# sample for a 20-cell quantisation — reading a cell's color off an endpoint
+# would claim a precision the cell does not have.
 GRAD_CELLS=()
 init_grad_cells() {
     local k
     for (( k = 0; k < BAR_LEN; k++ )); do
-        GRAD_CELLS[k]=$(color_for $(( k * 100 / (BAR_LEN - 1) )))
+        GRAD_CELLS[k]=$(color_for $(( (k * 100 + 50) / BAR_LEN )))
     done
 }
 
@@ -805,7 +830,7 @@ sub_type=$(jq -r 'try (.claudeAiOauth.subscriptionType // "unknown") catch "unkn
 rate_tier=$(jq -r 'try (.claudeAiOauth.rateLimitTier // "") catch ""' <<< "$creds")
 
 # --- Cache / lock setup ---
-mkdir -p "$CACHE_DIR" 2>/dev/null || die "Cannot create cache dir.\nCheck ~/.cache permissions."
+mkdir -p "$CACHE_DIR" 2>/dev/null || die "Cannot create cache dir.\n$CACHE_DIR is not writable."
 cache_file="$CACHE_DIR/usage.json"
 credits_file="$CACHE_DIR/credits.json"
 stale_marker="$CACHE_DIR/.stale"
@@ -1356,7 +1381,7 @@ if [[ "$FORMAT" != *"{session_pct}"* ]]; then
     elif [[ "$FORMAT" == *"{sonnet_pct}"* ]]; then bar_pct=$sonnet_pct
     fi
 fi
-bar_class=$(severity_for "$bar_pct")
+bar_fg=$(color_for "$bar_pct")
 
 # --- Structured JSON output (--json) ---
 # Raw data for alternative frontends (e.g. the Omarchy shell plugin in
@@ -1503,6 +1528,14 @@ if [[ "$JSON_MODE" == "true" ]]; then
     exit 0
 fi
 
+# --- Escape API-supplied strings for Pango ---
+# Everything below renders markup, and the plan label comes from the credentials
+# file, so a stray & or < would produce invalid markup (Waybar then drops the
+# whole label). The structured output above is deliberately escape-free: it
+# carries raw data, and jq handles its own quoting. The per-model meter names
+# are escaped at their own render site.
+plan=$(pango_escape "$plan")
+
 # --- Apply format placeholders ---
 # When --format-pace-color is set, pace placeholders are individually colored
 # per window based on pacing delta. Otherwise they inherit the bar color.
@@ -1607,13 +1640,6 @@ stale_icon=""
 bar_text=$(apply_format "$FORMAT")${stale_icon}
 
 # --- Colorize bar text via Pango ---
-case "$bar_class" in
-    low)      bar_fg="$BAR_COLOR_LOW" ;;
-    mid)      bar_fg="$BAR_COLOR_MID" ;;
-    high)     bar_fg="$BAR_COLOR_HIGH" ;;
-    critical) bar_fg="$BAR_COLOR_CRITICAL" ;;
-    *)        bar_fg="$BAR_COLOR_LOW" ;;
-esac
 if [[ "$BAR_PLAIN" == "true" ]]; then
     # Monochrome bar: no wrapper, and any color a placeholder brought with it
     # (progress bars, per-window pace colors) is stripped. The class field is
@@ -1746,7 +1772,7 @@ else
         _le_code="" _le_msg=""
         { read -r _le_code || true; read -r _le_msg || true; } < "$CACHE_DIR/.last_error" 2>/dev/null || true
         if [[ -n "$_le_code" ]] && [[ "$_le_code" =~ ^[0-9]+$ ]] && [[ "$_le_code" != "000" ]]; then
-            _le_msg=$(sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g' <<< "$_le_msg")
+            _le_msg=$(pango_escape "$_le_msg")
             if (( _le_code >= 500 )); then
                 _err_icon="󰅚" _err_color="$RED"
             else

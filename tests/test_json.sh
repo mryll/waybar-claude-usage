@@ -291,7 +291,7 @@ for bad in "x'><span foreground='red'>" "red'" '<b>' "a b" "#12345" "#gggggg" ""
     assert_exit0      "rejects [${bad:-<empty>}]: exit 0"
     assert_json_valid "rejects [${bad:-<empty>}]: valid JSON"
     assert_jq "rejects [${bad:-<empty>}]: names the flag" \
-        '.error.message' '--color-low must be a hex color or a plain color name'
+        '.error.message' '--color-low must be a hex color (#RGB/#RRGGBB) or a color name'
 done
 for good in red tomato '#abc' '#abcd' '#98c379' '#98c379ff'; do
     run_claudebar "$MIN" --json --color-low "$good"
