@@ -29,7 +29,7 @@
         "key": "refreshIntervalSec",
         "type": "integer",
         "label": "Refresh interval (seconds)",
-        "description": "How often to re-run the CLI. The API response is cached for 60s, so anything below that re-reads the same cached answer. Opening the panel and middle-clicking the bar both force a fresh fetch regardless.",
+        "description": "How often to re-run the CLI. The API response is cached for 60s, so anything below that re-reads the same cached answer — and the usage endpoint rate-limits hard: under 300s it usually answers HTTP 429. Opening the panel and middle-clicking the bar both force a fresh fetch regardless.",
         "min": 60,
         "max": 3600,
         "step": 30,

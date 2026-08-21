@@ -90,6 +90,8 @@ Add the module to your `~/.config/waybar/config.jsonc` file:
 }
 ```
 
+Run `claudebar --help` for the full reference: the usage line, every flag, and the format placeholders.
+
 > [!WARNING]
 > The OAuth usage endpoint and the prepaid-credit endpoint are not documented. The usage endpoint has strict rate limits. An interval of less than 300 seconds will usually cause HTTP 429 errors. Errors are also possible at 300 seconds if the Anthropic service has a problem. If this occurs, the widget shows the data from the cache with a `` pause sign. If the balance is not available, the widget shows it as unknown. It does not show the monthly limit in its place. Refer to [claude-code#30930](https://github.com/anthropics/claude-code/issues/30930).
 
@@ -354,7 +356,7 @@ A Waybar config with a custom format:
 
 | Placeholder | Description | Example |
 |---|---|---|
-| `{icon}` | Claude icon (Nerd Font) | `󰚩` |
+| `{icon}` | The widget mark, in the Nerd Font | `󰚩` |
 | `{plan}` | Plan label | Max 5x |
 | `{session_pct}` | Session (5h) usage % | 42 |
 | `{session_remaining_pct}` | Session left % (100 − used) | 58 |
@@ -537,21 +539,43 @@ Set `padding` (inside the widget) and `margin` (outside the widget) in `~/.confi
 
 ## Structured JSON output
 
-`claudebar --json` writes one JSON object of raw data to stdout. The object has numbers, ISO-8601 times and state words. It has no Pango markup and no colors, so any frontend can show it. This is the interface between the script and the Omarchy plugin, and it is available to your own tools.
+`claudebar --json` prints one JSON object with the data and no markup. Use this output for your own bar, your own script, or a status page. The command always exits with 0, and it always prints valid JSON, also after an error.
 
 ```bash
-claudebar --json | jq .session
+claudebar --json | jq
 claudebar --json --refresh   # force a fresh API fetch
 ```
 
-The object has `schema_version: 1` and the plan label. It also has the `session`, `weekly` and `sonnet` limits, a `models` array with the model limits, `extra_usage`, `overall`, `cache` information and an `error` field. State words are `low`, `mid`, `high` and `critical` for use, and `under`, `on_pace`, `ahead` and `hot` for pace.
+| Field | Contains |
+|---|---|
+| `schema_version` | The version of this format. It is `2` |
+| `error` | `null`, or an object with a `message` when there is no document at all |
+| `loading` | `true` while there is no data yet |
+| `plan` | The plan name |
+| `state` | The state of the fullest window: `low`, `mid`, `high`, or `critical` |
+| `max_pct` | The percentage of that fullest window |
+| `windows` | One entry for each limit. See below |
+| `extra_usage` | The extra-usage ledger. See below |
+| `palette` | The colors of the gauge, and the `stops` that give the ramp |
+| `stale` | `true` when the data is not new |
+| `stale_reason` | `network` or `error` |
+| `updated_at` | The time of the data, in ISO 8601 |
+| `data_age_seconds` | The age of the data, in seconds |
+| `last_error` | The last error from the API, with `http_status` and `message` |
 
-In `extra_usage`, `used_credit_cents` is the money spent this month, `available_credit_cents` is the exact prepaid balance, and `monthly_limit_cents` is only a safety limit. `funded_credit_cents` is the spend plus the balance. Thus `used_pct` and the meter measure the real money, not the monthly limit. The fields that come from the balance are `null` when the separate ledger endpoint is not available. One exception: the explicit `out_of_credits` state of Claude means a balance of zero.
+Each entry in `windows` has: `id`, `label`, `group` (the meter it belongs to, for a per-model limit), `used_pct`, `remaining_pct`, `reset_at`, `reset_at_unix`, `window_seconds`, `elapsed_pct`, `state`, and a `pace` object.
 
-The `palette` field carries the color gauge. `palette.stops` is the gauge itself: `[{"pct": 0, "color": "#…"}, …]`, the anchor colors and also the percentages where they turn. A frontend calculates the colors between the stops and gets the same green-to-red gauge that the tooltip has. A change to a threshold in the script moves every frontend with it. The `palette.low`, `palette.mid`, `palette.high` and `palette.critical` fields are short names for the same four anchors.
+The `pace` object has `delta_points` (your use minus the elapsed time, in percentage points), `state` (`under`, `on_pace`, `ahead`, or `hot`), `icon` and `indicator` (the arrow), `ratio_label` and `points_label` (the text that the tooltip prints).
+
+`palette.stops` is the gauge itself: the colors, and the percentage where each color is. The value is a list of `{pct, color}`, from 0 to 100. A frontend reads the list and mixes the colors between the stops, so it does not need to know the limits. If you move a limit in the script, the bar, the tooltip, the `state` field, and the panel change together.
+
+> [!IMPORTANT]
+> `schema_version` went from `1` to `2`, and version 2 breaks version 1. The reason: claudebar and codexbar now print the same document, so one script reads both. What changed: the `session`, `weekly`, `sonnet` and `models` keys became the one `windows` list, where `label` is the window and `group` is the meter it belongs to; `resets_at` became `reset_at`; `pace.delta_pts` and `pace.pts_label` became `pace.delta_points` and `pace.points_label`; the `cache` object became the `stale`, `stale_reason`, `updated_at` and `data_age_seconds` fields; `overall.max_pct` and `overall.state` became `max_pct` and `state`; an API error behind old data moved from `error` to `last_error`, and `error` now means only a hard failure; `loading`, `error` and `windows` are always present; `palette.stops` has a fifth stop at 100.
 
 > [!NOTE]
 > The script always exits with code 0, in JSON mode also. Waybar hides a module that exits with an error, so a problem is data in the `error` field, not an exit code.
+
+In `extra_usage`, `used_credit_cents` is the money spent this month, `available_credit_cents` is the exact prepaid balance, and `monthly_limit_cents` is only a safety limit. `funded_credit_cents` is the spend plus the balance. Thus `used_pct` and the meter measure the real money, not the monthly limit. The fields that come from the balance are `null` when the separate ledger endpoint is not available. One exception: the explicit `out_of_credits` state of Claude means a balance of zero.
 
 ## How it works
 
