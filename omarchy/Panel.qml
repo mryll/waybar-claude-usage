@@ -14,6 +14,7 @@ Panel {
   id: root
   moduleName: "mryll.claudebar"
   ipcTarget: "mryll.claudebar"
+  manageIpc: false
 
   property var anchorItem: null
 
@@ -40,8 +41,8 @@ Panel {
   // warning tone — never full urgent, which is reserved for something the user
   // must act on. Text stays the primary carrier; the tint only reinforces it,
   // so a monochrome panel loses nothing.
-  readonly property color freshnessWarn: panelMono ? dim : mix(dim, urgent, 0.4)
-  readonly property color track: Style.selectedFillFor(foreground, Color.accent)
+  readonly property color freshnessWarn: panelColored ? mix(dim, urgent, 0.4) : dim
+  readonly property color track: Style.selectedFillFor(foreground, Color.accent, urgent)
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   readonly property bool vertical: bar ? bar.vertical : false
 
@@ -65,9 +66,14 @@ Panel {
   // keeps reading through the numbers and glyphs, which is what a user asking
   // for no colors is choosing. The CLI is never asked for --no-color: the
   // structured JSON is colorless data, and this widget decides its own look.
-  readonly property string colorMode: String(setting("colorMode", "full"))
-  readonly property bool panelMono: colorMode === "none" || colorMode === "bar-only"
-  readonly property bool barMono: colorMode === "none" || colorMode === "panel-only"
+  // An unrecognized value normalizes to "full": a hand-edited shell.json must
+  // not be able to silently take the color off both surfaces.
+  readonly property string colorMode: {
+    var v = String(setting("colorMode", "full"))
+    return ["full", "none", "bar-only", "panel-only"].indexOf(v) >= 0 ? v : "full"
+  }
+  readonly property bool barColored:   colorMode === "full" || colorMode === "bar-only"
+  readonly property bool panelColored: colorMode === "full" || colorMode === "panel-only"
 
   readonly property int refreshSec: Math.max(60, parseInt(setting("refreshIntervalSec", 300), 10) || 300)
   readonly property bool showLabel: setting("showLabel", true) === true
@@ -236,8 +242,9 @@ Panel {
   // no value to color.
   readonly property color barColor: {
     if (!hasData) return barFaceDim
-    return barMono ? barFaceForeground
-      : contrastFloor(usageColor(barWindowPct), barBackdrop, barFaceForeground, 4.5)
+    return barColored
+      ? contrastFloor(usageColor(barWindowPct), barBackdrop, barFaceForeground, 4.5)
+      : barFaceForeground
   }
 
   // Serving cached data. Drawn on the bar as ⏸, matching the CLI's bar text.
@@ -255,12 +262,23 @@ Panel {
       var entry = windows[i]
       if (!entry.w || entry.w === shown) continue
       if (String(entry.w.state || "") !== "critical") continue
-      out.push(entry.title + ": " + Math.round(Number(entry.w.used_pct || 0)) + "%")
+      out.push(entry)
     }
     return out
   }
 
-  readonly property bool otherWindowCritical: criticalOthers.length > 0
+  readonly property bool hasCriticalOther: criticalOthers.length > 0
+
+  // Names the offender so the dot explains itself instead of being a mystery
+  // mark: "Weekly: 100%", one line each when several are spent.
+  readonly property string criticalOthersText: {
+    var lines = []
+    for (var i = 0; i < criticalOthers.length; i++) {
+      var entry = criticalOthers[i]
+      lines.push(entry.title + ": " + Math.round(Number(entry.w.used_pct || 0)) + "%")
+    }
+    return lines.join("\n")
+  }
 
   // The shell's shared tooltip renders this, outside the plugin's control, so
   // the API-supplied window names are escaped and then wrapped: the <span>
@@ -271,19 +289,22 @@ Panel {
       .replace(/>/g, "&gt;").replace(/\n/g, "<br/>") + "</span>"
   }
 
-  // Names what the alarm dot is pointing at. Empty when there is no dot, so
-  // the bar face carries no tooltip at all in the normal case and the panel
-  // stays the detail view.
-  // Names what the marks on the bar face are pointing at: the maxed-out windows
-  // the alarm dot stands for, and the pause mark's reason. Empty when the face
-  // carries no mark at all, so the bar stays tooltip-free in the normal case
-  // and the panel remains the detail view.
-  readonly property string alarmTooltip: {
+  // Empty when there is no mark — Bar.showTooltip short-circuits on empty text,
+  // so the bar face stays tooltip-free in the normal case and the panel remains
+  // the detail view.
+  readonly property string barTooltip: {
     var parts = []
-    if (criticalOthers.length > 0) parts.push(criticalOthers.join(" · "))
+    if (hasCriticalOther) parts.push(criticalOthersText)
     if (barStale) parts.push(" Stale — showing the last data from " + (updatedText() || "earlier"))
     return parts.length > 0 ? safeTooltip(parts.join("\n")) : ""
   }
+
+  // The dot is a warning, so it takes the gauge's critical anchor (under the
+  // same contrast floor as the label); monochrome keeps the mark but drops the
+  // color, since the tooltip is what carries the meaning.
+  readonly property color criticalDotColor: barColored
+    ? contrastFloor(gaugeCritical, barBackdrop, barFaceForeground, 4.5)
+    : barFaceForeground
 
   // Dim the icon while there is nothing good to show, or when the CLI is
   // reporting errors behind stale data — the details live in the panel.
@@ -301,9 +322,9 @@ Panel {
   // takes to stay legible against the popup surface, so the hue survives
   // wherever it can.
   readonly property color panelBackdrop: Color.popups.background
-  readonly property color brandColor: panelMono
-    ? foreground
-    : contrastFloor(toColor("#D97757"), panelBackdrop, foreground, 3.0)
+  readonly property color brandColor: panelColored
+    ? contrastFloor(toColor("#D97757"), panelBackdrop, foreground, 3.0)
+    : foreground
 
   // ---------------------------------------------------------------- helpers
 
@@ -401,7 +422,7 @@ Panel {
   // monochrome. Kept separate from usageColor so the bar face can still be
   // colored while the panel is not (and vice versa).
   function panelValueColor(pct) {
-    return panelMono ? foreground : usageColor(pct)
+    return panelColored ? usageColor(pct) : foreground
   }
 
   // Pacing severity → color. Only burning fast earns full urgent; slightly
@@ -409,7 +430,7 @@ Panel {
   function paceColor(state) {
     // Monochrome keeps the distinction as lightness rather than hue: burning
     // fast reads at full foreground, everything calmer stays dimmed.
-    if (panelMono) return state === "hot" ? foreground : dim
+    if (!panelColored) return state === "hot" ? foreground : dim
     if (state === "hot") return urgent
     if (state === "ahead") return mix(dim, urgent, 0.5)
     return dim
@@ -541,6 +562,21 @@ Panel {
     openSweep.restart()
     refresh(false)
     Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+  }
+
+  // The shell's base handler covers open/close/show/hide/toggle; this one adds
+  // `refresh` so a keybind or a script can force a fetch without opening the
+  // panel. Overriding means restating the five, so `manageIpc: false` above
+  // turns the base one off and this is the only handler on the target.
+  IpcHandler {
+    target: root.ipcTarget
+
+    function open(): void { root.open() }
+    function close(): void { root.close() }
+    function show(): void { root.open() }
+    function hide(): void { root.close() }
+    function toggle(): void { root.toggle() }
+    function refresh(): void { root.refresh(true) }
   }
 
   Process {
@@ -786,8 +822,8 @@ Panel {
                 ? "HTTP " + root.apiError.code : ""
               textFormat: Text.PlainText
               color: root.apiError && Number(root.apiError.code) >= 500
-                ? (root.panelMono ? root.foreground : root.urgent)
-                : (root.panelMono ? root.dim : root.mix(root.dim, root.urgent, 0.5))
+                ? (root.panelColored ? root.urgent : root.foreground)
+                : (root.panelColored ? root.mix(root.dim, root.urgent, 0.5) : root.dim)
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
               font.bold: true

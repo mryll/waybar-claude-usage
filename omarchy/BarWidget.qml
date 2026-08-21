@@ -10,7 +10,10 @@ BarWidget {
   id: root
   moduleName: "mryll.claudebar"
   readonly property string brandIcon: "\ue861"
-  readonly property string barLabel: panelLoader.item ? panelLoader.item.barLabel : ""
+
+  readonly property var panelItem: panelLoader.item
+
+  readonly property string barLabel: panelItem ? panelItem.barLabel : ""
   readonly property string plainText: brandIcon + (barLabel !== "" ? " " + barLabel : "")
 
   function injectPanel() {
@@ -23,35 +26,35 @@ BarWidget {
   }
 
   function refresh() {
-    if (panelLoader.item) panelLoader.item.refresh(false)
+    if (panelItem && panelItem.refresh) panelItem.refresh(false)
   }
 
   function refreshForce() {
-    if (panelLoader.item) panelLoader.item.refresh(true)
+    if (panelItem && panelItem.refresh) panelItem.refresh(true)
   }
 
   function togglePanel() {
-    if (panelLoader.item) panelLoader.item.toggle()
+    if (panelItem && panelItem.toggle) panelItem.toggle()
   }
 
   // Shape contract for shell summon/hide/toggle routing: Bar.findPanelWidget
   // requires open/close/opened on the bar-widget root.
-  readonly property bool opened: panelLoader.item ? panelLoader.item.opened === true : false
+  readonly property bool opened: panelItem ? panelItem.opened === true : false
 
   function open() {
-    if (panelLoader.item) panelLoader.item.open()
+    if (panelItem && panelItem.open) panelItem.open()
   }
 
   function close() {
-    if (panelLoader.item) panelLoader.item.close()
+    if (panelItem && panelItem.close) panelItem.close()
   }
 
   // Forwarded so this widget can stand in for the panel as the bar's popout
   // identity (Bar.requestPopout prefers closeForPopoutSwitch over close).
-  readonly property bool popoutSwitchClosing: panelLoader.item ? panelLoader.item.popoutSwitchClosing === true : false
+  readonly property bool popoutSwitchClosing: panelItem ? panelItem.popoutSwitchClosing === true : false
 
   function closeForPopoutSwitch() {
-    if (panelLoader.item) panelLoader.item.closeForPopoutSwitch()
+    if (panelItem) panelItem.closeForPopoutSwitch()
   }
 
   // How wide the bar's open-panel underline should be. Without this hint the bar
@@ -95,7 +98,7 @@ BarWidget {
     text: root.plainText
     labelVisible: false
     fixedWidth: root.vertical ? -1 : contentRow.implicitWidth + button.scaledHorizontalMargin * 2
-    foreground: panelLoader.item ? panelLoader.item.barColor
+    foreground: root.panelItem ? root.panelItem.barColor
       : (root.bar ? root.bar.barForeground : Color.foreground)
     // Degradation is expressed in barColor (a blend toward the muted shade),
     // never by dimming the button: WidgetButton.dimmed drops the whole face to
@@ -106,7 +109,7 @@ BarWidget {
     // tooltip. The one exception is the alarm dot: a 4px mark can't say what
     // it is about, so while it shows, hovering names the window that is maxed
     // out. Empty string the rest of the time — no dot, no tooltip.
-    tooltipText: panelLoader.item ? panelLoader.item.alarmTooltip : ""
+    tooltipText: root.panelItem ? root.panelItem.barTooltip : ""
 
     onPressed: function(b) {
       if (b === Qt.MiddleButton) root.refreshForce()
@@ -119,7 +122,7 @@ BarWidget {
       id: contentRow
       x: Math.round((parent.width - root.markExtent) / 2)
       anchors.verticalCenter: parent.verticalCenter
-      spacing: label.visible ? Style.spacing.labelGap : 0
+      spacing: (label.visible || staleMark.visible || alertSlot.visible) ? Style.spacing.labelGap : 0
 
       Text {
         text: root.brandIcon
@@ -149,7 +152,8 @@ BarWidget {
       // the bar and the panel never show one percentage in two colors. Hovering
       // the widget says what it means.
       Text {
-        visible: panelLoader.item ? panelLoader.item.barStale === true : false
+        id: staleMark
+        visible: root.panelItem ? root.panelItem.barStale === true : false
         // nf-fa-pause, not U+23F8: the Unicode pause resolves to the COLOR
         // emoji glyph here, which paints its own orange and ignores the theme
         // tone this mark is supposed to wear. U+FE0E does not help — the font
@@ -164,23 +168,34 @@ BarWidget {
         anchors.verticalCenter: parent.verticalCenter
       }
 
-      // A window other than the one on the bar is maxed out. The label's color
-      // belongs to the number it shows, so the alarm gets its own mark instead
-      // of recoloring that number — a dot small enough to read as punctuation.
-      Rectangle {
-        id: alarmDot
-        visible: panelLoader.item ? panelLoader.item.otherWindowCritical === true : false
-        width: Math.max(3, Math.round(button.fontSize * 0.32))
-        height: width
-        radius: width / 2
-        // Monochrome bar keeps the mark — it is the alarm, not decoration —
-        // but paints it in the same foreground as the label.
-        color: panelLoader.item && panelLoader.item.barMono === true
-          ? button.foreground
-          : (root.bar ? root.bar.urgent : Color.urgent)
-        anchors.verticalCenter: parent.verticalCenter
-        // Sits just above the text's midline, where a degree sign would go.
-        anchors.verticalCenterOffset: -Math.round(button.fontSize * 0.28)
+      // Alarm dot: some window OTHER than the one shown is spent. The label's
+      // color belongs to the number it shows, so the alarm gets its own mark
+      // instead of recoloring that number — a dot small enough to read as
+      // punctuation. Hovering the widget names the offender.
+      //
+      // Sized off the label's own line box so it centers against the text on
+      // the same midline as the pause mark: a Row top-aligns its children, and
+      // binding to the label (never to the Row, which sizes FROM its children)
+      // keeps that free of a height loop.
+      Item {
+        id: alertSlot
+        visible: root.panelItem ? root.panelItem.hasCriticalOther === true : false
+        width: dot.width
+        height: label.implicitHeight
+
+        Rectangle {
+          id: dot
+          anchors.centerIn: parent
+          // Scales with the bar font, so `omarchy font set` cannot leave a dot
+          // sized for a different text.
+          width: Math.max(3, Math.round(button.fontSize * 0.32))
+          height: width
+          radius: width / 2
+          // Monochrome bar keeps the mark — it is the alarm, not decoration —
+          // but paints it in the same foreground as the label.
+          color: root.panelItem ? root.panelItem.criticalDotColor
+                                : (root.bar ? root.bar.urgent : Color.urgent)
+        }
       }
     }
   }
