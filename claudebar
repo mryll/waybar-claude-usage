@@ -751,11 +751,11 @@ countdown() {
 calc_pacing() {
     local usage_pct=$1 resets_at=$2 window_s=$3
     local elapsed_pct=0 pace_icon="→" pace_indicator="→" pace_delta="0"
-    local pace_pct_label="on track" pace_pts_label="on track"
+    local pace_pct_label="on pace" pace_pts_label="on pace"
 
     if [[ -n "$resets_at" && "$resets_at" != "0" && "$resets_at" != "null" ]] && (( window_s > 0 )); then
         local reset_epoch remaining
-        reset_epoch=$(date -d "$resets_at" +%s 2>/dev/null) || { echo "0 → → 0 on track on track"; return; }
+        reset_epoch=$(date -d "$resets_at" +%s 2>/dev/null) || { echo "0 → → 0 on pace on pace"; return; }
         remaining=$(( reset_epoch - $(date +%s) ))
         elapsed_pct=$(( (window_s - remaining) * 100 / window_s ))
         (( elapsed_pct < 0 )) && elapsed_pct=0
@@ -1679,23 +1679,27 @@ else
     lines+=("SEP")
     lines+=("")
     lines+=(" <span foreground='${FG}'>  󰔟  Session</span>")
-    _lbl_s="$(display_pct "$session_pct")% ${_tip_session_pace}"
+    _lbl_s="$(display_pct "$session_pct")%"
     lines+=("   ${tip_session_bar}  $(_val_pad "$_lbl_s")<span font_weight='bold' foreground='${session_color}'>${_lbl_s}</span>")
-    lines+=(" <span foreground='${DIM}'>  󰥔  Resets in ${s_cd}</span>")
+    # El pacing vive con el texto que lo explica, no pegado al %: "34% ↓"
+    # se lee como si el USO hubiera bajado. Misma forma que el panel.
+    lines+=(" <span foreground='${DIM}'>  󰥔  Resets in ${s_cd}</span><span foreground='${DIM}'>  ·  ${session_pace_indicator} ${session_pace_pts}</span>")
     lines+=("")
     lines+=(" <span foreground='${FG}'>  󰃰  Weekly</span>")
-    _lbl_w="$(display_pct "$weekly_pct")% ${_tip_weekly_pace}"
+    _lbl_w="$(display_pct "$weekly_pct")%"
     lines+=("   ${tip_weekly_bar}  $(_val_pad "$_lbl_w")<span font_weight='bold' foreground='${weekly_color}'>${_lbl_w}</span>")
-    lines+=(" <span foreground='${DIM}'>  󰥔  Resets in ${w_cd}</span>")
+    # El pacing vive con el texto que lo explica, no pegado al %: "34% ↓"
+    # se lee como si el USO hubiera bajado. Misma forma que el panel.
+    lines+=(" <span foreground='${DIM}'>  󰥔  Resets in ${w_cd}</span><span foreground='${DIM}'>  ·  ${weekly_pace_indicator} ${weekly_pace_pts}</span>")
 
     if [[ "$has_sonnet" == "true" ]]; then
         tip_sonnet_bar=$(display_bar "$sonnet_pct" "$sonnet_elapsed" "$TOOLTIP_PACE_PTS")
         sn_cd=$(countdown "$sonnet_reset")
         lines+=("")
         lines+=(" <span foreground='${FG}'>  󱤔  Sonnet only</span>")
-        _lbl_n="$(display_pct "$sonnet_pct")% ${_tip_sonnet_pace}"
+        _lbl_n="$(display_pct "$sonnet_pct")%"
         lines+=("   ${tip_sonnet_bar}  $(_val_pad "$_lbl_n")<span font_weight='bold' foreground='${sonnet_color}'>${_lbl_n}</span>")
-        lines+=(" <span foreground='${DIM}'>  󰥔  Resets in ${sn_cd}</span>")
+        lines+=(" <span foreground='${DIM}'>  󰥔  Resets in ${sn_cd}</span><span foreground='${DIM}'>  ·  ${sonnet_pace_indicator} ${sonnet_pace_pts}</span>")
     fi
 
     # One section per model-scoped limit. Index 0 reuses the cached pacing/
@@ -1705,21 +1709,22 @@ else
         _mp="${model_pcts[$_mi]}"
         if (( _mi == 0 )); then
             _melapsed=$model_elapsed _mtip_pace=$_tip_model_pace
-            _mcolor=$model_color _mcd=$m_cd_val
+            _mcolor=$model_color _mcd=$m_cd_val _mpts=$model_pace_pts _mind=$model_pace_indicator
         else
             _mpace_out=$(calc_pacing "$_mp" "${model_resets[$_mi]}" "$WEEKLY_WINDOW")
             read -r _melapsed _micon _mind _mdiscard <<< "$_mpace_out"
             _mtip_pace="$_micon"
             [[ "$TOOLTIP_PACE_PTS" == "true" ]] && _mtip_pace="$_mind"
+            _mpts=$(cut -d' ' -f7-8 <<< "$_mpace_out")
             _mcolor=$(color_for "$_mp")
             _mcd=$(countdown "${model_resets[$_mi]}")
         fi
         _mbar=$(display_bar "$_mp" "$_melapsed" "$TOOLTIP_PACE_PTS")
         lines+=("")
         lines+=(" <span foreground='${FG}'>  󱤔  ${model_names_esc[$_mi]} only</span>")
-        _lbl_m="$(display_pct "$_mp")% ${_mtip_pace}"
+        _lbl_m="$(display_pct "$_mp")%"
         lines+=("   ${_mbar}  $(_val_pad "$_lbl_m")<span font_weight='bold' foreground='${_mcolor}'>${_lbl_m}</span>")
-        lines+=(" <span foreground='${DIM}'>  󰥔  Resets in ${_mcd}</span>")
+        lines+=(" <span foreground='${DIM}'>  󰥔  Resets in ${_mcd}</span><span foreground='${DIM}'>  ·  ${_mind} ${_mpts}</span>")
     done
 
     if [[ "$extra_show" == "true" ]]; then

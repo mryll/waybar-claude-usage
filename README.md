@@ -6,12 +6,12 @@
 claudebar is a Waybar widget that shows how much of your Claude AI plan you have used. It shows the session limit, the weekly limit and the per-model limits. Each one has a progress bar, a color for the level of use, and the time until it resets.
 
 <p align="center">
-  <img src="screenshots/waybar-bar.png" alt="claudebar in Waybar" width="800">
+  <img src="screenshots/waybar-bar.png" alt="claudebar in Waybar" width="144">
 </p>
 
 <p align="center">
   <em>A compact line in your bar. Move the pointer onto it to see all the limits:</em><br><br>
-  <img src="screenshots/waybar-tooltip.png" alt="claudebar tooltip" width="800">
+  <img src="screenshots/waybar-tooltip.png" alt="claudebar tooltip" width="468">
 </p>
 
 ## Features
@@ -98,7 +98,11 @@ Add the module to your `~/.config/waybar/config.jsonc` file:
 claudebar also has a native plugin for the Quickshell bar of the [Omarchy](https://omarchy.org) shell. The plugin is in the `omarchy/` directory of this repository. The bar shows the Claude glyph and a short usage percentage. A click opens a panel with one section for each limit. The footer of the panel ends with a refresh control (󰑐), next to the time of the last update. The control stays disabled while a fetch runs.
 
 <p align="center">
-  <img src="screenshots/omarchy-panel.png" alt="The claudebar panel in the Omarchy shell" width="420">
+  <img src="screenshots/omarchy-desktop.png" alt="claudebar in the Omarchy bar, with its panel open" width="960">
+</p>
+
+<p align="center">
+  <img src="screenshots/omarchy-panel.png" alt="The claudebar panel in the Omarchy shell" width="342">
 </p>
 
 Each section has an animated progress bar, the percentage, the countdown to the reset, and the pace indicator. Below the sections, the panel shows the extra usage and the state of the cache.
@@ -106,7 +110,7 @@ Each section has an animated progress bar, the percentage, the countdown to the 
 Each meter paints a color gauge along its full length and fills it up to the current value. The meter reads like a thermometer against a scale. It does not change its color as one block. The CLI resolves the gauge and sends it in the `palette` field of its JSON output: the colors and also the percentages where they turn. The panel reads those stops and calculates the colors between them. Thus one change in the core moves the tooltip and the panel together. Each number takes the color of the gauge at its own value, so the number and its meter always agree.
 
 <p align="center">
-  <img src="screenshots/omarchy-bar.png" alt="The claudebar widget in the Omarchy bar" width="520">
+  <img src="screenshots/omarchy-bar.png" alt="The claudebar widget in the Omarchy bar" width="68">
 </p>
 
 A small dot appears next to the percentage when a limit that is *not* on the bar becomes critical (90% or more). Thus a per-model limit that is almost full still gets your attention while the bar shows a comfortable session number. Move the pointer onto the widget and a tooltip gives the name of that limit, for example `Fable only: 100%`. When there is no dot, there is no tooltip, and the panel stays the full view of the data.
@@ -161,7 +165,7 @@ Change these settings in the settings window of the shell, or write them in the 
 | `colorMode` | `full` \| `none` \| `bar-only` \| `panel-only` | `full` | Where color is used. A monochrome surface uses only foreground tones. The numbers and the glyphs continue to show the level. This is equal to [`--no-color`](#monochrome-mode) in the CLI. |
 
 <p align="center">
-  <img src="screenshots/omarchy-panel-mono.png" alt="The claudebar panel with colorMode set to none" width="420">
+  <img src="screenshots/omarchy-panel-mono.png" alt="The claudebar panel with colorMode set to none" width="338">
 </p>
 
 > [!NOTE]
@@ -281,7 +285,7 @@ Do you prefer a bar without color? `--no-color` removes the color from all surfa
 | `--no-color=tooltip` | color | plain |
 
 <p align="center">
-  <img src="screenshots/waybar-tooltip-mono.png" alt="The claudebar tooltip with --no-color" width="800">
+  <img src="screenshots/waybar-tooltip-mono.png" alt="The claudebar tooltip with --no-color" width="468">
 </p>
 
 Plain means no color markup. Nothing else changes. The progress bars, the markers, the icons, the box lines, the bold text and all the numbers stay in their positions. The flag also removes color markup that you wrote yourself in a `--format` or `--tooltip-format` value.
@@ -493,17 +497,15 @@ claudebar --format-pace-color \
 
 ### Markers in the tooltip
 
-Use `--tooltip-pace-pts` to add a marker (`█`) to each progress bar in the tooltip. The marker shows the position of an even pace:
+Use `--tooltip-pace-pts` to add a marker (`┃`) to each progress bar in the tooltip. The marker shows where an even pace would have you:
 
 ```
 Without --tooltip-pace-pts:
-  Session
-    █████░░░░░░░░░░░░░░░  27% ↑
+  ██████░░░░░░░░░░░░░░     34%
 
 With --tooltip-pace-pts:
-  Session
-    █████░░░░░█░░░░░░░░░  27% ↑
-                  ^ marker at 32% (even pace position)
+  ██████░░░░░┃░░░░░░░░     34%
+             ^ even-pace position
 ```
 
 The color of the marker follows the active theme. Without this flag, the tooltip does not change.

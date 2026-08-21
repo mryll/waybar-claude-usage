@@ -913,8 +913,11 @@ Panel {
 
       Text {
         id: valueLabel
+        // Just the number. The pace arrow used to be glued here, where it read
+        // as a comment on the USAGE — "12% ↓" looks like the usage fell — when
+        // it is really about the pace. It now sits with the pace text that
+        // explains it, one line below, exactly as codexbar does.
         text: Math.round(section.shownPct) + "%"
-              + (section.pace ? " " + String(section.pace.indicator || "") : "")
         textFormat: Text.PlainText
         color: section.sevColor
         font.family: root.fontFamily
@@ -949,7 +952,16 @@ Panel {
 
       Text {
         id: paceLabel
-        text: section.pace ? String(section.pace.pts_label || "") : ""
+        // Arrow and text both come from the SIGN of the delta, so they can
+        // never disagree. The ±10 tolerance band lives in `state` and paints
+        // only the COLOR — saying "on pace" while the meter sits nine points
+        // behind its marker made the words contradict the picture.
+        text: {
+          if (!section.pace) return ""
+          var d = Number(section.pace.delta_pts)
+          if (!isFinite(d) || d === 0) return "→ on pace"
+          return (d > 0 ? "↑ " : "↓ ") + String(section.pace.pts_label || "")
+        }
         textFormat: Text.PlainText
         color: root.paceColor(section.pace ? String(section.pace.state || "") : "")
         font.family: root.fontFamily
