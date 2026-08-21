@@ -135,9 +135,10 @@ for _a in "$@"; do [[ "$_a" == "--json" ]] && JSON_MODE=true && break; done
 cli_error() {
     if [[ "$JSON_MODE" == "true" ]]; then
         if command -v jq &>/dev/null; then
-            jq -nc --arg m "$1" '{schema_version:1, error:{message:$m}}'
+            jq -nc --arg m "$1" \
+                '{schema_version:2, error:{message:$m}, loading:false, windows:[], extra_usage:null}'
         else
-            printf '{"schema_version":1,"error":{"message":"invalid arguments"}}\n'
+            printf '{"schema_version":2,"error":{"message":"invalid arguments"},"loading":false,"windows":[],"extra_usage":null}\n'
         fi
     else
         local _m="${1//\\/\\\\}"; _m="${_m//\"/\\\"}"
@@ -527,10 +528,11 @@ die() {
         _m="${_m//<b>/}"; _m="${_m//<\/b>/}"
         _m="${_m//\\n/ }"; _m="${_m//$'\n'/ }"
         if command -v jq &>/dev/null; then
-            jq -nc --arg m "$_m" '{schema_version:1, error:{message:$m}}'
+            jq -nc --arg m "$_m" \
+                '{schema_version:2, error:{message:$m}, loading:false, windows:[], extra_usage:null}'
         else
             _m="${_m//\\/\\\\}"; _m="${_m//\"/\\\"}"
-            printf '{"schema_version":1,"error":{"message":"%s"}}\n' "$_m"
+            printf '{"schema_version":2,"error":{"message":"%s"},"loading":false,"windows":[],"extra_usage":null}\n' "$_m"
         fi
         exit 0
     fi
@@ -551,7 +553,7 @@ die() {
 # doesn't draw attention to a state that will self-resolve on the next dispatch.
 loading_network() {
     if [[ "$JSON_MODE" == "true" ]]; then
-        jq -nc '{schema_version:1, loading:true, error:null}'
+        jq -nc '{schema_version:2, error:null, loading:true, windows:[], extra_usage:null}'
         exit 0
     fi
     jq -nc \
@@ -1399,35 +1401,66 @@ if [[ "$JSON_MODE" == "true" ]]; then
         printf '%s' "$s"
     }
 
-    # One usage window as a JSON object.
-    # Args: used_pct resets_at elapsed_pct pace_icon pace_indicator pace_delta
-    #       pace_pct_label pace_pts_label
+    # One usage window as a JSON object — the same shape codexbar publishes,
+    # field for field, so a script that reads one reads the other.
+    # Args: id label group window_seconds used_pct resets_at elapsed_pct
+    #       pace_icon pace_indicator pace_delta pace_ratio_label pace_pts_label
     json_window() {
+        local id=$1 label=$2 group=$3 window_s=$4 pct=$5 reset=$6 elapsed=$7
+        local icon=$8 indicator=$9 delta=${10:-0} pctl=${11} ptsl=${12}
+        # The API's own spelling is "+00:00"; codexbar publishes "Z". One form,
+        # so a consumer parsing both does not need two branches.
+        local reset_unix="" reset_iso=""
+        if [[ -n "$reset" ]]; then
+            reset_unix=$(date -d "$reset" +%s 2>/dev/null) || reset_unix=""
+            [[ -n "$reset_unix" ]] && reset_iso=$(date -u -d "@$reset_unix" +%Y-%m-%dT%H:%M:%SZ)
+        fi
         jq -nc \
-            --argjson pct "$1" --arg reset "$2" --argjson elapsed "$3" \
-            --arg icon "$4" --arg indicator "$5" --argjson delta "${6:-0}" \
-            --arg pctl "$7" --arg ptsl "$8" \
-            --argjson rem "$(remaining_pct_for "$1")" \
-            --arg state "$(severity_for "$1")" \
-            --arg pstate "$(pace_severity_for "${6:-0}")" \
-            '{used_pct:$pct, remaining_pct:$rem,
-              resets_at:(if $reset == "" then null else $reset end),
-              elapsed_pct:$elapsed, state:$state,
-              pace:{delta_pts:$delta, icon:$icon, indicator:$indicator,
-                    ratio_label:$pctl, pts_label:$ptsl, state:$pstate}}'
+            --arg id "$id" --arg label "$label" --arg group "$group" \
+            --argjson window_s "$window_s" \
+            --argjson pct "$pct" --arg reset "$reset_iso" \
+            --arg reset_unix "$reset_unix" --argjson elapsed "$elapsed" \
+            --arg icon "$icon" --arg indicator "$indicator" --argjson delta "$delta" \
+            --arg pctl "$pctl" --arg ptsl "$ptsl" \
+            --argjson rem "$(remaining_pct_for "$pct")" \
+            --arg state "$(severity_for "$pct")" \
+            --arg pstate "$(pace_severity_for "$delta")" \
+            '{id:$id, label:$label,
+              group:(if $group == "" then null else $group end),
+              used_pct:$pct, remaining_pct:$rem,
+              reset_at:(if $reset == "" then null else $reset end),
+              reset_at_unix:(if $reset_unix == "" then null else ($reset_unix|tonumber) end),
+              window_seconds:$window_s, elapsed_pct:$elapsed,
+              pace:{delta_points:$delta, state:$pstate,
+                    icon:$icon, indicator:$indicator,
+                    ratio_label:$pctl, points_label:$ptsl},
+              state:$state}'
     }
 
-    _json_sonnet="null"
+    # One flat list of usage windows, in the order the panel and the tooltip
+    # show them. An array rather than named keys because the model-scoped
+    # limits were always a list anyway, and because it is the shape codexbar
+    # publishes — one schema for the family beats two that describe the same
+    # thing. `group` names the meter a window belongs to (a model), `label`
+    # names the window inside it.
+    _win_objs=()
+    _win_objs+=("$(json_window session Session "" "$SESSION_WINDOW" \
+        "$session_pct" "$session_reset" "$session_elapsed" \
+        "$session_pace" "$session_pace_indicator" "$session_pace_delta" \
+        "$session_pace_pct" "$session_pace_pts")")
+    _win_objs+=("$(json_window weekly Weekly "" "$WEEKLY_WINDOW" \
+        "$weekly_pct" "$weekly_reset" "$weekly_elapsed" \
+        "$weekly_pace" "$weekly_pace_indicator" "$weekly_pace_delta" \
+        "$weekly_pace_pct" "$weekly_pace_pts")")
     if [[ "$has_sonnet" == "true" ]]; then
-        _json_sonnet=$(json_window "$sonnet_pct" "$sonnet_reset" "$sonnet_elapsed" \
+        _win_objs+=("$(json_window sonnet Weekly Sonnet "$WEEKLY_WINDOW" \
+            "$sonnet_pct" "$sonnet_reset" "$sonnet_elapsed" \
             "$sonnet_pace" "$sonnet_pace_indicator" "$sonnet_pace_delta" \
-            "$sonnet_pace_pct" "$sonnet_pace_pts")
+            "$sonnet_pace_pct" "$sonnet_pace_pts")")
     fi
-
-    # One entry per model-scoped weekly limit. Index 0 reuses the pacing
-    # already computed for the {model_*} placeholders; later entries compute
-    # inline — same split the tooltip renderer uses.
-    _json_models="[]"
+    # Index 0 reuses the pacing already computed for the {model_*}
+    # placeholders; later entries compute inline — same split the tooltip
+    # renderer uses.
     for _mi in "${!model_pcts[@]}"; do
         _mp="${model_pcts[$_mi]}"
         if (( _mi == 0 )); then
@@ -1439,10 +1472,11 @@ if [[ "$JSON_MODE" == "true" ]]; then
             _mpl=$(cut -d' ' -f5-6 <<< "$_mo")
             _mtl=$(cut -d' ' -f7-8 <<< "$_mo")
         fi
-        _mw=$(json_window "$_mp" "${model_resets[$_mi]}" "$_me" "$_mic" "$_min" "$_md" "$_mpl" "$_mtl")
-        _json_models=$(jq -c --argjson w "$_mw" --arg n "$(unescape_pango "${model_names_esc[$_mi]}")" \
-            '. + [{name:$n} + $w]' <<< "$_json_models")
+        _win_objs+=("$(json_window "model_${_mi}" Weekly \
+            "$(unescape_pango "${model_names_esc[$_mi]}")" "$WEEKLY_WINDOW" \
+            "$_mp" "${model_resets[$_mi]}" "$_me" "$_mic" "$_min" "$_md" "$_mpl" "$_mtl")")
     done
+    _json_windows=$(printf '%s\n' "${_win_objs[@]}" | jq -cs '.')
 
     _json_extra="null"
     if [[ "$extra_show" == "true" ]]; then
@@ -1472,17 +1506,23 @@ if [[ "$JSON_MODE" == "true" ]]; then
         (( _json_age < 0 )) && _json_age=0
     fi
     _json_stale=false
-    _json_stale_kind=""
+    _json_stale_reason=""
     if [[ "${transient_stale:-false}" == "true" ]]; then
-        _json_stale=true; _json_stale_kind="network"
+        _json_stale=true; _json_stale_reason="network"
     elif [[ -f "$stale_marker" ]]; then
-        _json_stale=true; _json_stale_kind="api"
+        _json_stale=true; _json_stale_reason="error"
     fi
-    _json_err_code=""
-    _json_err_msg=""
+    # `error` is reserved for a hard failure (no document at all); an API error
+    # sitting BEHIND usable cached data is `last_error`, which is a different
+    # thing and must not make a consumer think the payload is empty.
+    _json_last_error=null
     if [[ -f "$CACHE_DIR/.last_error" ]]; then
-        { read -r _json_err_code || true; read -r _json_err_msg || true; } < "$CACHE_DIR/.last_error" 2>/dev/null || true
-        [[ "$_json_err_code" =~ ^[0-9]+$ && "$_json_err_code" != "000" ]] || _json_err_code=""
+        _le_code="" _le_msg=""
+        { read -r _le_code || true; read -r _le_msg || true; } < "$CACHE_DIR/.last_error" 2>/dev/null || true
+        if [[ -n "$_le_code" && "$_le_code" =~ ^[0-9]+$ && "$_le_code" != "000" ]]; then
+            _json_last_error=$(jq -nc --argjson c "$_le_code" --arg m "$_le_msg" \
+                '{http_status:$c, message:(if $m == "" then ("HTTP " + ($c|tostring)) else $m end)}')
+        fi
     fi
 
     # The ramp itself, colors and the percentages they sit at, so a frontend
@@ -1491,40 +1531,34 @@ if [[ "$JSON_MODE" == "true" ]]; then
     for _gi in "${!GAUGE_PCTS[@]}"; do
         _gauge_rows+="${GAUGE_PCTS[$_gi]} ${GAUGE_COLORS[$_gi]}"$'\n'
     done
+    # A closing stop at 100: without it a consumer interpolating between stops
+    # has nothing above the critical anchor and has to invent the top of the
+    # ramp. Same five stops codexbar publishes.
+    _gauge_rows+="100 ${GAUGE_COLORS[-1]}"$'\n'
     _json_stops=$(printf '%s' "$_gauge_rows" | jq -R -s '
         split("\n") | map(select(length > 0) | split(" ")
                           | {pct: (.[0] | tonumber), color: .[1]})')
 
     jq -nc \
-        --arg plan "$plan" \
+        --arg plan "$plan" --arg state "$class" --argjson max_pct "$max_pct" \
         --arg pal_low "$BAR_COLOR_LOW" --arg pal_mid "$BAR_COLOR_MID" \
         --arg pal_high "$BAR_COLOR_HIGH" --arg pal_critical "$BAR_COLOR_CRITICAL" \
         --argjson pal_stops "$_json_stops" \
-        --argjson session "$(json_window "$session_pct" "$session_reset" "$session_elapsed" \
-            "$session_pace" "$session_pace_indicator" "$session_pace_delta" \
-            "$session_pace_pct" "$session_pace_pts")" \
-        --argjson weekly "$(json_window "$weekly_pct" "$weekly_reset" "$weekly_elapsed" \
-            "$weekly_pace" "$weekly_pace_indicator" "$weekly_pace_delta" \
-            "$weekly_pace_pct" "$weekly_pace_pts")" \
-        --argjson sonnet "$_json_sonnet" \
-        --argjson models "$_json_models" \
+        --argjson windows "$_json_windows" \
         --argjson extra "$_json_extra" \
-        --argjson max_pct "$max_pct" --arg overall "$class" \
         --arg updated "$_json_updated" --argjson age "$_json_age" \
-        --argjson stale "$_json_stale" --arg stale_kind "$_json_stale_kind" \
-        --arg err_code "$_json_err_code" --arg err_msg "$_json_err_msg" \
-        '{schema_version:1, plan:$plan,
-          session:$session, weekly:$weekly, sonnet:$sonnet, models:$models,
-          extra_usage:$extra,
+        --argjson stale "$_json_stale" --arg stale_reason "$_json_stale_reason" \
+        --argjson last_error "$_json_last_error" \
+        '{schema_version:2, error:null, loading:false,
+          plan:$plan, state:$state, max_pct:$max_pct,
+          windows:$windows, extra_usage:$extra,
           palette:{low:$pal_low, mid:$pal_mid, high:$pal_high, critical:$pal_critical,
                    stops:$pal_stops},
-          overall:{max_pct:$max_pct, state:$overall},
-          cache:{updated_at:(if $updated == "" then null else $updated end),
-                 age_s:$age, stale:$stale,
-                 stale_kind:(if $stale_kind == "" then null else $stale_kind end)},
-          error:(if $err_code == "" then null
-                 else {message:(if $err_msg == "" then ("HTTP " + $err_code) else $err_msg end),
-                       code:($err_code|tonumber)} end)}'
+          stale:$stale,
+          stale_reason:(if $stale_reason == "" then null else $stale_reason end),
+          updated_at:(if $updated == "" then null else $updated end),
+          data_age_seconds:$age,
+          last_error:$last_error}'
     exit 0
 fi
 

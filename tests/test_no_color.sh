@@ -115,7 +115,7 @@ run_claudebar "$FX" --json --no-color=purple
 assert_exit0 "unknown value in JSON mode: exit 0"
 assert_json_valid "unknown value in JSON mode: valid JSON"
 _jq_is() { local got; got=$(jq -r "$2" <<<"$OUT"); [[ "$got" == "$3" ]] && _ok "$1" || _no "$1" "got $got want $3"; }
-_jq_is "unknown value in JSON mode: schema_version" '.schema_version' '1'
+_jq_is "unknown value in JSON mode: schema_version" '.schema_version' '2'
 _jq_is "unknown value in JSON mode: error message" '.error.message' '--no-color must be all, bar, or tooltip'
 
 echo "== structured JSON is unchanged with and without the flag"

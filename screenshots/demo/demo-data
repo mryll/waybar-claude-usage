@@ -15,7 +15,7 @@
 # test suite.
 #
 # Optional switches (default: a healthy, fresh document):
-#   CLAUDEBAR_DEMO_ERROR=429            show the API-error card (code[:message])
+#   CLAUDEBAR_DEMO_ERROR=503            show the API-error card (code[:message])
 #   CLAUDEBAR_DEMO_STALE=1              show the stale/⏸ footer instead of "Updated"
 set -euo pipefail
 
@@ -34,12 +34,32 @@ export XDG_STATE_HOME XDG_CACHE_HOME
 
 demo_home=$(mktemp -d) || exit 0
 trap 'rm -rf "$demo_home"' EXIT
-mkdir -p "$demo_home/.claude" "$demo_home/.cache/claudebar" "$demo_home/bin"
+mkdir -p "$demo_home/.claude" "$demo_home/.cache/claudebar" "$demo_home/bin" \
+         "$demo_home/.local/state"
 
-# Nothing may reach the network: every document below is already "cached", and
-# a stub makes that structural rather than a matter of timing.
-printf '#!/usr/bin/env bash\nexit 1\n' > "$demo_home/bin/curl"
-chmod +x "$demo_home/bin/curl"
+# The active Omarchy theme is linked in (read-only) so the demo renders in
+# whatever theme the screenshot session is using, instead of falling back to
+# the built-in palette. A frontend that reads $HOME directly finds it here.
+if [[ -d "${HOME:-}/.local/state/omarchy" ]]; then
+    ln -sfn "$HOME/.local/state/omarchy" "$demo_home/.local/state/omarchy"
+fi
+
+# The script reads curl's answer as "body, newline, HTTP status", so the stub
+# has to reproduce exactly that shape. Written through a heredoc rather than a
+# nested printf format: the escaping needed to emit a printf that emits a
+# newline is three levels deep and gets silently wrong (one missing backslash
+# turns the separator into a literal "n", the status stops matching ^[0-9]{3}$,
+# and the widget reports "waiting for network" instead of the error under test).
+#
+# Nothing may reach the network either way: the stub IS curl for this run.
+write_curl_stub() {  # <body-json> <http-status>
+    cat > "$demo_home/bin/curl" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' $(printf '%q' "$1")
+printf '%s'   $(printf '%q' "$2")
+STUB
+    chmod +x "$demo_home/bin/curl"
+}
 
 # Generic plan, far-future expiry so no token refresh is attempted. No account
 # identifiers anywhere: the plan label is all the widget reads.
@@ -49,33 +69,47 @@ printf '%s' '{"claudeAiOauth":{"accessToken":"demo","refreshToken":"demo",
 
 # --- The demo day -----------------------------------------------------------
 #
-# Resets are computed from *now*, so countdowns, elapsed markers and pacing all
-# render live. The spread is deliberate: one window in each band of the gauge,
-# and one window in each pacing state.
+# THE SAME DAY codexbar's fixture renders, slot for slot: same usage numbers,
+# same elapsed positions, same gauge bands, same pacing states. The two widgets
+# sit next to each other in every README, so a reader comparing them must be
+# comparing the DESIGN and not two unrelated afternoons. Only the fifth row
+# differs, and it has to: one product sells credits and the other sells extra
+# usage against a monthly cap.
 #
-#   window        usage  elapsed  band      pacing
-#   Session         34%     ~56%  green     under      (plenty of room left)
-#   Weekly          58%     ~54%  amber     ahead      (slightly hot)
-#   Sonnet          50%     ~54%  amber     on pace
-#   Opus            78%     ~54%  orange    hot
-#   Fable          100%     ~54%  red       hot        (drives the alarm dot)
-#   Extra usage     75%        —  orange               ($37.50 of $50 funded)
+# Resets are computed from *now*, so countdowns, elapsed markers and pacing all
+# render live.
+#
+#   window       used  elapsed  band       pace
+#   Session       34%      15%  green      +19 ahead
+#   Weekly        68%      68%  amber       0 on pace
+#   Sonnet        82%      95%  orange     -13 under
+#   Opus          94%      60%  critical   +34 ahead   (drives the alarm dot)
+#   Fable         12%      60%  deep green -48 under
+#   Extra usage   75%        —  orange                 ($37.50 of $50 funded)
 now=$(date +%s)
+FIVE_H=18000
+WEEK=604800
 iso() { date -u -d "@$(( now + $1 ))" +%Y-%m-%dT%H:%M:%S+00:00; }
-session_reset=$(iso $(( 2 * 3600 + 10 * 60 )))   # 2h 10m  -> ~56% of the 5h window
-weekly_reset=$(iso $(( 3 * 86400 + 4 * 3600 )))  # 3d 4h   -> ~54% of the 7d window
+session_reset=$(iso $(( FIVE_H * 85 / 100 )))    # 15% elapsed -> 4h 15m left
+weekly_reset=$(iso  $(( WEEK   * 32 / 100 )))    # 68% elapsed -> 2d 5h left
+sonnet_reset=$(iso  $(( WEEK   *  5 / 100 )))    # 95% elapsed -> 8h 24m left
+opus_reset=$(iso    $(( WEEK   * 40 / 100 )))    # 60% elapsed -> 2d 19h left
+fable_reset=$(iso   $(( WEEK   * 40 / 100 )))    # 60% elapsed -> 2d 19h left
 
 jq -n \
   --arg session_reset "$session_reset" \
   --arg weekly_reset "$weekly_reset" \
+  --arg sonnet_reset "$sonnet_reset" \
+  --arg opus_reset "$opus_reset" \
+  --arg fable_reset "$fable_reset" \
   '{
      five_hour:        { utilization: 34, resets_at: $session_reset },
-     seven_day:        { utilization: 58, resets_at: $weekly_reset },
-     seven_day_sonnet: { utilization: 50, resets_at: $weekly_reset },
+     seven_day:        { utilization: 68, resets_at: $weekly_reset },
+     seven_day_sonnet: { utilization: 82, resets_at: $sonnet_reset },
      limits: [
-       { kind: "weekly_scoped", percent: 78,  resets_at: $weekly_reset,
+       { kind: "weekly_scoped", percent: 94, resets_at: $opus_reset,
          scope: { model: { display_name: "Opus" } } },
-       { kind: "weekly_scoped", percent: 100, resets_at: $weekly_reset,
+       { kind: "weekly_scoped", percent: 12, resets_at: $fable_reset,
          scope: { model: { display_name: "Fable" } } }
      ],
      extra_usage: { is_enabled: true, used_credits: 3750, monthly_limit: 20000 }
@@ -86,16 +120,41 @@ jq -n \
 # instead of "unknown" — and keeps it distinct from the $200 monthly cap.
 printf '{"amount":1250}' > "$demo_home/.cache/claudebar/credits.json"
 
-# Both documents must read as fresh, or the widget renders its stale form.
-touch "$demo_home/.cache/claudebar/usage.json" "$demo_home/.cache/claudebar/credits.json"
-
-if [[ -n "${CLAUDEBAR_DEMO_ERROR:-}" ]]; then
-    demo_code="${CLAUDEBAR_DEMO_ERROR%%:*}"
-    demo_msg="${CLAUDEBAR_DEMO_ERROR#*:}"
-    [[ "$demo_msg" == "$CLAUDEBAR_DEMO_ERROR" ]] && demo_msg="Rate limited. Please try again later."
-    printf '%s\n%s' "$demo_code" "$demo_msg" > "$demo_home/.cache/claudebar/.last_error"
+# Freshness is driven the way production drives it — the cache's age plus what
+# the network answers — instead of by planting the marker files the script
+# writes for itself. That way the demo exercises the real staleness path and
+# cannot drift from it.
+DEMO_ERROR="${CLAUDEBAR_DEMO_ERROR:-}"
+DEMO_STALE="${CLAUDEBAR_DEMO_STALE:-}"
+if [[ -n "$DEMO_ERROR" || -n "$DEMO_STALE" ]]; then
+    demo_code="${DEMO_ERROR%%:*}"; demo_code="${demo_code:-503}"
+    demo_msg="${DEMO_ERROR#*:}"
+    [[ "$demo_msg" == "$DEMO_ERROR" || -z "$demo_msg" ]] && demo_msg="Upstream temporarily unavailable"
+    # Old enough that the script refetches AND takes its boot-like path (over
+    # NET_BOOT_CACHE_AGE), where a recent .net_wait means a sibling has already
+    # established the network is down.
+    touch -d "@$(( now - 900 ))" "$demo_home/.cache/claudebar/usage.json" \
+                                 "$demo_home/.cache/claudebar/credits.json"
+    if [[ -n "$DEMO_ERROR" ]]; then
+        write_curl_stub "$(jq -nc --arg m "$demo_msg" '{error:{message:$m}}')" "$demo_code"
+    else
+        # Stale WITHOUT an error: the network is simply unreachable, which is the
+        # other way a widget ends up serving cached data. One retry, not the full
+        # budget, so the demo answers as fast as the healthy variant.
+        printf '#!/usr/bin/env bash\nexit 1\n' > "$demo_home/bin/curl"
+        # A sibling instance already found the network down in this episode, so
+        # this run takes the single-attempt path instead of burning the whole
+        # retry budget. A real state, not a shortcut — and it keeps the demo as
+        # fast as the healthy variant.
+        touch "$demo_home/.cache/claudebar/.net_wait"
+        chmod +x "$demo_home/bin/curl"
+    fi
+else
+    # Both documents must read as fresh, or the widget renders its stale form.
+    touch "$demo_home/.cache/claudebar/usage.json" "$demo_home/.cache/claudebar/credits.json"
+    # Same payload, HTTP 200: a refetch, if one ever happened, changes nothing.
+    write_curl_stub "$(<"$demo_home/.cache/claudebar/usage.json")" 200
 fi
-[[ -n "${CLAUDEBAR_DEMO_STALE:-}" ]] && touch "$demo_home/.cache/claudebar/.stale"
 
 # Run the real renderer against the demo tree. Not exec'd, so the trap still
 # cleans up; claudebar always exits 0 by design.

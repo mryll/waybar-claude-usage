@@ -21,24 +21,29 @@ run_claudebar_with_credits "$FULL" '{"amount":1000,"currency":"USD"}' --json
 assert_exit0     "exit 0"
 assert_json_valid "valid JSON"
 assert_no_pango  "no Pango markup"
-assert_jq "schema_version"        '.schema_version'          '1'
+assert_jq "schema_version"        '.schema_version'          '2'
 assert_jq "plan label"            '.plan'                    'Max'
-assert_jq "session used_pct"      '.session.used_pct'        '42'
-assert_jq "session remaining_pct" '.session.remaining_pct'   '58'
-assert_jq "session resets_at ISO" '.session.resets_at'       '2030-01-01T00:00:00+00:00'
-assert_jq "session state (42 -> low)"   '.session.state'     'low'
-assert_jq "weekly state (77 -> high)"   '.weekly.state'      'high'
-assert_jq "sonnet present"        '.sonnet.used_pct'         '15'
-assert_jq "model entry name"      '.models[0].name'          'Fable'
-assert_jq "model state (91 -> critical)" '.models[0].state'  'critical'
-assert_jq "models count"          '.models | length'         '1'
+assert_jq "session used_pct"      '.windows[0].used_pct'     '42'
+assert_jq "session remaining_pct" '.windows[0].remaining_pct' '58'
+assert_jq "session id"            '.windows[0].id'           'session'
+assert_jq "session label"         '.windows[0].label'        'Session'
+assert_jq "session reset_at ISO"  '.windows[0].reset_at'     '2030-01-01T00:00:00Z'
+assert_jq "session window_seconds" '.windows[0].window_seconds' '18000'
+assert_jq "session state (42 -> low)"   '.windows[0].state'  'low'
+assert_jq "weekly state (77 -> high)"   '.windows[1].state'  'high'
+assert_jq "sonnet present"        '.windows[2].used_pct'     '15'
+assert_jq "sonnet group"          '.windows[2].group'        'Sonnet'
+assert_jq "sonnet label"          '.windows[2].label'        'Weekly'
+assert_jq "model entry name"      '.windows[3].group'        'Fable'
+assert_jq "model state (91 -> critical)" '.windows[3].state' 'critical'
+assert_jq "windows count"         '.windows | length'        '4'
 assert_jq "extra spent cents"     '.extra_usage.used_credit_cents'   '250'
 assert_jq "extra available cents" '.extra_usage.available_credit_cents' '1000'
 assert_jq "extra funded cents"    '.extra_usage.funded_credit_cents' '1250'
 assert_jq "extra limit cents"     '.extra_usage.monthly_limit_cents' '5000'
 assert_jq "extra used_pct"        '.extra_usage.used_pct'    '20'
-assert_jq "overall max_pct"       '.overall.max_pct'         '91'
-assert_jq "overall state"         '.overall.state'           'critical'
+assert_jq "max_pct"               '.max_pct'                 '91'
+assert_jq "state"                 '.state'                   'critical'
 # Gauge palette: the resolved anchor colors, so the QML frontend paints the
 # same green→amber→red ramp the Pango tooltip does (one palette, two frontends).
 assert_jq "palette low (One Dark fallback)"      '.palette.low'      '#98c379'
@@ -49,50 +54,53 @@ assert_jq "palette aliases are hex colors" \
     '[.palette | to_entries[] | select(.key != "stops") | .value | test("^#[0-9a-fA-F]{6}$")] | all' 'true'
 # The ramp is published with its stop POSITIONS, so a frontend interpolates the
 # same thresholds instead of hardcoding them a second time.
-assert_jq "stops: one per anchor"        '.palette.stops | length' '4'
-assert_jq "stops: thresholds"            '[.palette.stops[].pct] | @csv' '0,50,75,90'
+# Five stops, not four: a closing stop at 100 so a consumer interpolating
+# between them never has to invent the top of the ramp.
+assert_jq "stops: one per anchor + close" '.palette.stops | length' '5'
+assert_jq "stops: thresholds"            '[.palette.stops[].pct] | @csv' '0,50,75,90,100'
 assert_jq "stops: ascending"             '[.palette.stops[].pct] == ([.palette.stops[].pct] | sort)' 'true'
 assert_jq "stops: colors are hex"        '[.palette.stops[].color | test("^#[0-9a-fA-F]{6}$")] | all' 'true'
 assert_jq "stops agree with the aliases" \
-    '[.palette.stops[].color] == [.palette.low, .palette.mid, .palette.high, .palette.critical]' 'true'
+    '[.palette.stops[].color] == [.palette.low, .palette.mid, .palette.high, .palette.critical, .palette.critical]' 'true'
 # Every state boundary in the payload sits on a published stop: one definition.
 assert_jq "stops cover the severity boundaries" \
     '[.palette.stops[].pct] | contains([50, 75, 90])' 'true'
-assert_jq "cache not stale"       '.cache.stale'             'false'
-assert_jq "cache age numeric"     '.cache.age_s | type'      'number'
+assert_jq "not stale"             '.stale'                   'false'
+assert_jq "age numeric"           '.data_age_seconds | type' 'number'
+assert_jq "loading always present" '.loading'                'false'
 assert_jq "no error"              '.error'                   'null'
 # pace: elapsed 0 (far-future reset), so delta == used_pct — self-consistent
 assert_jq "pace delta = used - elapsed" \
-    '.session.pace.delta_pts == .session.used_pct - .session.elapsed_pct' 'true'
-assert_jq "pace state string"     '.session.pace.state'      'hot'
-assert_jq "pace pts label"        '.session.pace.pts_label'  '42pts ahead'
+    '.windows[0].pace.delta_points == .windows[0].used_pct - .windows[0].elapsed_pct' 'true'
+assert_jq "pace state string"     '.windows[0].pace.state'   'hot'
+assert_jq "pace pts label"        '.windows[0].pace.points_label' '42pts ahead'
 
 echo "== minimal payload"
 run_claudebar "$MIN" --json
 assert_exit0     "exit 0"
 assert_json_valid "valid JSON"
 assert_jq "sonnet null when absent"      '.sonnet'      'null'
-assert_jq "models empty when absent"     '.models'      '[]'
+assert_jq "only the two main windows"    '.windows | length' '2'
 assert_jq "extra null when absent"       '.extra_usage' 'null'
-assert_jq "weekly state (27 -> low)"     '.weekly.state' 'low'
+assert_jq "weekly state (27 -> low)"     '.windows[1].state' 'low'
 
 echo "== sonnet dedup (scoped Sonnet entry skipped when seven_day_sonnet is present)"
 DUP='{"five_hour":{"utilization":10,"resets_at":"2030-01-01T00:00:00+00:00"},"seven_day":{"utilization":10,"resets_at":"2030-01-01T00:00:00+00:00"},"seven_day_sonnet":{"utilization":15,"resets_at":"2030-01-01T00:00:00+00:00"},"limits":[{"kind":"weekly_scoped","percent":15,"resets_at":"2030-01-01T00:00:00+00:00","scope":{"model":{"display_name":"Sonnet"}}},{"kind":"weekly_scoped","percent":33,"resets_at":"2030-01-01T00:00:00+00:00","scope":{"model":{"display_name":"Fable"}}}]}'
 run_claudebar "$DUP" --json
-assert_jq "sonnet window kept"    '.sonnet.used_pct'  '15'
-assert_jq "only Fable in models"  '.models | length'  '1'
-assert_jq "Fable is the entry"    '.models[0].name'   'Fable'
+assert_jq "sonnet window kept"    '.windows[2].used_pct'  '15'
+assert_jq "only Fable is added"   '.windows | length'  '4'
+assert_jq "Fable is the entry"    '.windows[3].group' 'Fable'
 
 echo "== model name unescape (raw data, not Pango-escaped)"
 AMP='{"five_hour":{"utilization":10,"resets_at":"2030-01-01T00:00:00+00:00"},"seven_day":{"utilization":10,"resets_at":"2030-01-01T00:00:00+00:00"},"limits":[{"kind":"weekly_scoped","percent":5,"resets_at":"2030-01-01T00:00:00+00:00","scope":{"model":{"display_name":"A&B <X>"}}}]}'
 run_claudebar "$AMP" --json
-assert_jq "name round-trips raw"  '.models[0].name'   'A&B <X>'
+assert_jq "name round-trips raw"  '.windows[2].group' 'A&B <X>'
 
 echo "== error paths still emit schema_version JSON, exit 0"
 run_claudebar_creds '{}' "$MIN" --json
 assert_exit0      "no-token creds: exit 0"
 assert_json_valid "no-token creds: valid JSON"
-assert_jq "no-token creds: schema_version" '.schema_version' '1'
+assert_jq "no-token creds: schema_version" '.schema_version' '2'
 assert_jq "no-token creds: error message"  '.error.message | length > 0' 'true'
 assert_no_pango   "no-token creds: no <b>/<span> markup"
 run_claudebar_creds 'not json' "$MIN" --json
@@ -104,9 +112,9 @@ export CLAUDEBAR_TEST_NET_QUICK_BUDGET=0 CLAUDEBAR_TEST_NET_LONG_BUDGET=0 CLAUDE
 run_claudebar "$MIN" --json --refresh
 assert_exit0      "--refresh offline: exit 0"
 assert_json_valid "--refresh offline: valid JSON"
-assert_jq "--refresh offline: data from cache" '.session.used_pct' '42'
-assert_jq "--refresh offline: stale"           '.cache.stale'      'true'
-assert_jq "--refresh offline: stale_kind"      '.cache.stale_kind' 'network'
+assert_jq "--refresh offline: data from cache" '.windows[0].used_pct' '42'
+assert_jq "--refresh offline: stale"           '.stale'            'true'
+assert_jq "--refresh offline: stale_reason"    '.stale_reason'     'network'
 unset CLAUDEBAR_TEST_NET_QUICK_BUDGET CLAUDEBAR_TEST_NET_LONG_BUDGET CLAUDEBAR_TEST_NET_RETRY_DELAY
 
 echo "== palette honors --color-* overrides (same anchors that color the tooltip)"
@@ -118,7 +126,7 @@ assert_jq "palette mid overridden"      '.palette.mid'      '#112233'
 assert_jq "palette high overridden"     '.palette.high'     '#445566'
 assert_jq "palette critical overridden" '.palette.critical' '#ff0000'
 assert_jq "overrides reach the stops too" \
-    '[.palette.stops[].color] | join(",")' '#00ff00,#112233,#445566,#ff0000'
+    '[.palette.stops[].color] | join(",")' '#00ff00,#112233,#445566,#ff0000,#ff0000'
 
 echo "== palette follows the active Omarchy theme (both layouts)"
 # <theme-relative-dir> <colors.toml body> [args...] — builds a HOME with a theme
@@ -337,11 +345,11 @@ echo "== arg errors in JSON mode speak the structured schema (pre-scan)"
 run_claudebar "$MIN" --json --bogus
 assert_exit0      "bad flag after --json: exit 0"
 assert_json_valid "bad flag after --json: valid JSON"
-assert_jq "bad flag after --json: schema_version" '.schema_version' '1'
+assert_jq "bad flag after --json: schema_version" '.schema_version' '2'
 assert_jq "bad flag after --json: message names the flag" '.error.message' 'Unknown option: --bogus'
 run_claudebar "$MIN" --bogus --json
 assert_json_valid "bad flag before --json: valid JSON"
-assert_jq "bad flag before --json: still structured" '.schema_version' '1'
+assert_jq "bad flag before --json: still structured" '.schema_version' '2'
 run_claudebar "$MIN" --json --icon
 assert_json_valid "missing flag value: valid JSON"
 assert_jq "missing flag value: structured message" '.error.message' '--icon requires a value'
@@ -363,7 +371,7 @@ OUT=$(env HOME="$_h" XDG_STATE_HOME="$_h/.local/state" XDG_CACHE_HOME="$_h/.cach
       XDG_CONFIG_HOME="$_h/.config" PATH="$_h" "$BASH" "$SCRIPT" --json --bogus); RC=$?
 rm -rf "$_h"
 [[ "$RC" -eq 0 ]] && _ok "jq-less: exit 0" || _no "jq-less: exit 0" "exit=$RC"
-[[ "$OUT" == '{"schema_version":1,"error":{"message":"invalid arguments"}}' ]] \
+[[ "$OUT" == '{"schema_version":2,"error":{"message":"invalid arguments"},"loading":false,"windows":[],"extra_usage":null}' ]] \
     && _ok "jq-less: fixed literal" || _no "jq-less: fixed literal" "got: $OUT"
 
 echo "== cache.age_s clamps at 0 on future mtime (clock skew)"
@@ -386,8 +394,8 @@ run_future_cache_json() {  # <usage-json>
 run_future_cache_json "$MIN"
 assert_exit0      "future mtime: exit 0"
 assert_json_valid "future mtime: valid JSON"
-assert_jq "future mtime: age_s clamped at 0"  '.cache.age_s' '0'
-assert_jq "future mtime: data still served"   '.session.used_pct' '42'
+assert_jq "future mtime: age clamped at 0"   '.data_age_seconds' '0'
+assert_jq "future mtime: data still served"   '.windows[0].used_pct' '42'
 
 echo "== error.code shape (normalized: null | {message, code?})"
 run_claudebar "$MIN" --json
@@ -406,11 +414,14 @@ run_with_last_error_json() {  # <usage-json> <code> <message>
 }
 run_with_last_error_json "$MIN" 429 "Rate limited"
 assert_json_valid "last_error: valid JSON"
-assert_jq "last_error: message"      '.error.message'  'Rate limited'
-assert_jq "last_error: code numeric" '.error.code'     '429'
-assert_jq "last_error: no http_code key" '.error | has("http_code")' 'false'
+# An API error BEHIND usable cached data is `last_error`; `error` stays null
+# and is reserved for a hard failure with no document at all.
+assert_jq "last_error: error stays null" '.error'      'null'
+assert_jq "last_error: message"      '.last_error.message'  'Rate limited'
+assert_jq "last_error: status numeric" '.last_error.http_status' '429'
+assert_jq "last_error: no legacy code key" '.last_error | has("code")' 'false'
 run_with_last_error_json "$MIN" 500 ""
-assert_jq "last_error empty msg: message normalized" '.error.message' 'HTTP 500'
+assert_jq "last_error empty msg: message normalized" '.last_error.message' 'HTTP 500'
 
 echo "== --refresh does not change waybar output shape"
 export CLAUDEBAR_TEST_NET_QUICK_BUDGET=0 CLAUDEBAR_TEST_NET_LONG_BUDGET=0 CLAUDEBAR_TEST_NET_RETRY_DELAY=0

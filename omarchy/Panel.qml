@@ -1,5 +1,6 @@
 pragma ComponentBehavior: Bound
 import QtQuick
+import QtQuick.Controls
 import Quickshell.Io
 import qs.Commons
 import qs.Ui
@@ -168,7 +169,7 @@ Panel {
       loadError = ""
       return
     }
-    if (d.error && !d.session) {
+    if (d.error && !(Array.isArray(d.windows) && d.windows.length > 0)) {
       // Hard failure (no credentials, missing dependency, …): no usable
       // windows in this payload, keep the last good data on screen.
       setError(String(d.error.message || "claudebar failed"))
@@ -184,16 +185,32 @@ Panel {
 
   // Every usage window the payload carries, in tooltip order: session,
   // weekly, the legacy Sonnet window, then one per model-scoped limit.
+  // The CLI publishes the list already ordered and already named; the panel
+  // does not rebuild it from named keys any more. Each entry carries `label`
+  // (the window inside a meter) and `group` (the meter it belongs to), which
+  // is what windowTitle joins.
   readonly property var windows: {
-    if (!usage) return []
+    if (!usage || !Array.isArray(usage.windows)) return []
     var out = []
-    if (usage.session) out.push({ title: "Session", w: usage.session })
-    if (usage.weekly) out.push({ title: "Weekly", w: usage.weekly })
-    if (usage.sonnet) out.push({ title: "Sonnet only", w: usage.sonnet })
-    var models = usage.models || []
-    for (var i = 0; i < models.length; i++)
-      out.push({ title: String(models[i].name || "Model") + " only", w: models[i] })
+    for (var i = 0; i < usage.windows.length; i++) {
+      var w = usage.windows[i]
+      if (!w) continue
+      out.push({ title: windowTitle(w), w: w })
+    }
     return out
+  }
+
+  function windowTitle(w) {
+    if (!w) return ""
+    var label = String(w.label || "")
+    return w.group ? String(w.group) + " · " + label : label
+  }
+
+  function windowById(id) {
+    if (!usage || !Array.isArray(usage.windows)) return null
+    for (var i = 0; i < usage.windows.length; i++)
+      if (usage.windows[i] && String(usage.windows[i].id) === id) return usage.windows[i]
+    return null
   }
 
   readonly property var extra: usage ? (usage.extra_usage || null) : null
@@ -207,15 +224,14 @@ Panel {
     var available = extra.balance_known === true ? money(extra.available_credit_cents) : "—"
     return "Available: " + available + " · Monthly limit: " + money(extra.monthly_limit_cents)
   }
-  readonly property bool stale: pluginStale
-    || !!(usage && usage.cache && usage.cache.stale === true)
-  readonly property var apiError: usage ? (usage.error || null) : null
+  readonly property bool stale: pluginStale || !!(usage && usage.stale === true)
+  // `error` is a hard failure with no document; `last_error` is an API error
+  // sitting behind data that is still usable. This panel renders the latter.
+  readonly property var apiError: usage ? (usage.last_error || null) : null
 
   // ---------------------------------------------------------------- bar face
 
-  readonly property var barWindowData: usage
-    ? (barWindowSetting === "Weekly" ? usage.weekly : usage.session)
-    : null
+  readonly property var barWindowData: windowById(barWindowSetting === "Weekly" ? "weekly" : "session")
 
   readonly property string barLabel: {
     if (!showLabel || vertical || !barWindowData) return ""
@@ -256,7 +272,7 @@ Panel {
   // named and quantified so the mark can explain itself on hover.
   readonly property var criticalOthers: {
     if (!usage) return []
-    var shown = barWindowSetting === "Weekly" ? usage.weekly : usage.session
+    var shown = barWindowData
     var out = []
     for (var i = 0; i < windows.length; i++) {
       var entry = windows[i]
@@ -355,16 +371,28 @@ Panel {
   // urgent blend, so the panel still renders sanely against cached data.
   readonly property var gaugePalette: usage && usage.palette ? usage.palette : null
 
-  function paletteColor(key, fallbackFactor) {
-    if (gaugePalette && typeof gaugePalette[key] === "string" && gaugePalette[key].length > 0)
-      return gaugePalette[key]
-    return mix(foreground, urgent, fallbackFactor)
+  // Fallback for a payload that has not arrived yet (or an older CLI without
+  // `palette`): synthesise the anchors from the theme at fixed gauge hues —
+  // saturation off urgent, lightness off foreground, both clamped so the ramp
+  // stays legible on any theme. The previous fallback blended foreground →
+  // urgent, which produced a wash rather than a gauge: green, amber and red
+  // are the whole point of the shape and none of them survived it.
+  function gaugeColor(hue) {
+    var saturation = clamp(urgent.hslSaturation, 0.45, 0.85)
+    var lightness = clamp(foreground.hslLightness, 0.32, 0.72)
+    return Qt.hsla(hue, saturation, lightness, 1)
   }
 
-  readonly property color gaugeLow: paletteColor("low", 0)
-  readonly property color gaugeMid: paletteColor("mid", 0.4)
-  readonly property color gaugeHigh: paletteColor("high", 0.7)
-  readonly property color gaugeCritical: paletteColor("critical", 1)
+  function paletteColor(key, fallback) {
+    if (gaugePalette && typeof gaugePalette[key] === "string" && gaugePalette[key].length > 0)
+      return gaugePalette[key]
+    return fallback
+  }
+
+  readonly property color gaugeLow: paletteColor("low", gaugeColor(0.33))
+  readonly property color gaugeMid: paletteColor("mid", gaugeColor(0.14))
+  readonly property color gaugeHigh: paletteColor("high", gaugeColor(0.07))
+  readonly property color gaugeCritical: paletteColor("critical", urgent)
 
   // Colors arrive from JSON as strings; Qt.darker(c, 1.0) is the identity
   // conversion that turns one into a color object whose channels can be read.
@@ -493,8 +521,8 @@ Panel {
   }
 
   function resetText(w) {
-    if (!w || !w.resets_at) return ""
-    var ms = new Date(w.resets_at).getTime() - nowMs
+    if (!w || !w.reset_at) return ""
+    var ms = new Date(w.reset_at).getTime() - nowMs
     if (!isFinite(ms)) return ""
     return ms > 0 ? "Resets in " + formatDuration(ms) : "Resets now"
   }
@@ -506,8 +534,8 @@ Panel {
   }
 
   function updatedText() {
-    if (!usage || !usage.cache || !usage.cache.updated_at) return ""
-    var t = new Date(usage.cache.updated_at)
+    if (!usage || !usage.updated_at) return ""
+    var t = new Date(usage.updated_at)
     if (isNaN(t.getTime())) return ""
     return Qt.formatTime(t, "HH:mm")
   }
@@ -528,7 +556,7 @@ Panel {
   function footerSuffix() {
     if (!hasData || !stale) return ""
     if (pluginStale) return " · stale (refresh failed)"
-    return " · stale (" + (usage.cache.stale_kind === "network"
+    return " · stale (" + (usage.stale_reason === "network"
       ? "waiting for network" : "API errors") + ")"
   }
 
@@ -636,7 +664,7 @@ Panel {
     open: root.opened
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(340))
-    contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(640))
+    contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(620))
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -661,6 +689,7 @@ Panel {
         boundsBehavior: Flickable.StopAtBounds
         flickableDirection: Flickable.VerticalFlick
         interactive: contentHeight > height
+        ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
         Column {
           id: column
@@ -685,19 +714,48 @@ Panel {
             }
           }
 
+          // ---------- Empty / error states ----------
+          //
+          // Two different situations, two different surfaces, the same two in
+          // codexbar: "nothing to show yet" is a quiet centred line, while a
+          // hard failure is a bordered card — a thing that went wrong deserves
+          // an edge around it. An error BEHIND stale data is neither: that one
+          // rides under the data it explains, at the bottom of the panel.
           Text {
-            visible: !root.hasData
+            visible: !root.hasData && root.loadError === ""
             width: parent.width
             topPadding: Style.space(16)
-            text: root.loadError !== ""
-              ? root.loadError
-              : "No usage data yet.\nLog in with the claude CLI and refresh."
+            text: "No usage data yet.\nLog in with the claude CLI and refresh."
             textFormat: Text.PlainText
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.body
             horizontalAlignment: Text.AlignHCenter
             wrapMode: Text.WordWrap
+          }
+
+          BorderSurface {
+            visible: !root.hasData && root.loadError !== ""
+            width: parent.width
+            implicitHeight: errorText.implicitHeight + Style.spacing.xl * 2
+            color: root.alpha(root.panelColored ? root.urgent : root.foreground, 0.10)
+            borderSpec: Border.flat(root.alpha(root.panelColored ? root.urgent : root.foreground, 0.35), 1)
+            radius: Style.cornerRadius
+
+            Text {
+              id: errorText
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              anchors.leftMargin: Style.space(12)
+              anchors.rightMargin: Style.space(12)
+              textFormat: Text.PlainText
+              text: root.loadError
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+            }
           }
 
           // ---------- Usage windows ----------
@@ -709,11 +767,11 @@ Panel {
           Column {
             visible: root.windows.length > 0
             width: parent.width
-            spacing: Style.space(12)
+            spacing: Style.space(10)
 
             PanelSectionHeader {
               width: parent.width
-              text: "USAGE WINDOWS"
+              text: "USAGE"
               foreground: root.foreground
               fontFamily: root.fontFamily
             }
@@ -810,37 +868,30 @@ Panel {
             foreground: root.foreground
           }
 
-          Column {
+          // One caption line, not a heading plus a body: the code and the
+          // message are one sentence about one failure, and giving the code its
+          // own larger bold line made a footnote look like a section.
+          Text {
             visible: !!root.apiError || (root.hasData && root.loadError !== "")
             width: parent.width
-            spacing: Style.space(4)
-
-            Text {
-              visible: !!root.apiError && root.apiError.code !== undefined
-              width: parent.width
-              text: root.apiError && root.apiError.code !== undefined
-                ? "HTTP " + root.apiError.code : ""
-              textFormat: Text.PlainText
-              color: root.apiError && Number(root.apiError.code) >= 500
-                ? (root.panelColored ? root.urgent : root.foreground)
-                : (root.panelColored ? root.mix(root.dim, root.urgent, 0.5) : root.dim)
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.bodySmall
-              font.bold: true
+            textFormat: Text.PlainText
+            text: {
+              if (root.apiError) {
+                var head = root.apiError.http_status !== undefined ? "HTTP " + root.apiError.http_status : ""
+                var msg = String(root.apiError.message || "")
+                if (head === "") return msg
+                return msg !== "" ? head + " — " + msg : head
+              }
+              return root.hasData ? root.loadError : ""
             }
-
-            Text {
-              visible: text !== ""
-              width: parent.width
-              text: root.apiError && root.apiError.message
-                ? String(root.apiError.message)
-                : (root.hasData ? root.loadError : "")
-              textFormat: Text.PlainText
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-              wrapMode: Text.WordWrap
-            }
+            // 5xx is the server failing; 4xx is usually something the user can
+            // act on. Full urgent is reserved for the former.
+            color: root.apiError && Number(root.apiError.http_status) >= 500
+              ? (root.panelColored ? root.urgent : root.foreground)
+              : (root.panelColored ? root.mix(root.dim, root.urgent, 0.5) : root.dim)
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
           }
 
           // ---- Freshness footer: when the data is from, plus an inline
@@ -927,7 +978,7 @@ Panel {
     readonly property real shownPct: sectionMeter.shownPct
     readonly property color sevColor: root.panelValueColor(shownPct)
 
-    spacing: Style.space(5)
+    spacing: Style.space(6)
 
     Item {
       width: parent.width
@@ -968,7 +1019,7 @@ Panel {
       id: sectionMeter
       width: parent.width
       pct: section.usedPct
-      markerAt: section.w && section.w.resets_at ? section.elapsedPct / 100 : -1
+      markerAt: section.w && section.w.reset_at ? section.elapsedPct / 100 : -1
     }
 
     Item {
@@ -994,9 +1045,9 @@ Panel {
         // behind its marker made the words contradict the picture.
         text: {
           if (!section.pace) return ""
-          var d = Number(section.pace.delta_pts)
+          var d = Number(section.pace.delta_points)
           if (!isFinite(d) || d === 0) return "→ on pace"
-          return (d > 0 ? "↑ " : "↓ ") + String(section.pace.pts_label || "")
+          return (d > 0 ? "↑ " : "↓ ") + String(section.pace.points_label || "")
         }
         textFormat: Text.PlainText
         color: root.paceColor(section.pace ? String(section.pace.state || "") : "")
