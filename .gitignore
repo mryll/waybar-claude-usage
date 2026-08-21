@@ -2,3 +2,6 @@
 *.swo
 *~
 .DS_Store
+
+# Agent working notes (plans, specs) — never part of the published repo.
+docs/superpowers/
