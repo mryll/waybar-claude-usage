@@ -5,10 +5,10 @@ source "$(dirname "$0")/lib.sh"
 BASE='"five_hour":{"utilization":42,"resets_at":"2030-01-01T00:00:00+00:00"},"seven_day":{"utilization":27,"resets_at":"2030-01-01T00:00:00+00:00"}'
 FABLE='{'"$BASE"',"limits":[{"kind":"session","group":"session","percent":42,"resets_at":"2030-01-01T00:00:00+00:00","scope":null},{"kind":"weekly_all","group":"weekly","percent":27,"resets_at":"2030-01-01T00:00:00+00:00","scope":null},{"kind":"weekly_scoped","group":"weekly","percent":67,"resets_at":"2030-01-01T00:00:00+00:00","scope":{"model":{"id":null,"display_name":"Fable"},"surface":null}}]}'
 
-# --- default tooltip gets a "<Model> only" section ---
+# --- default tooltip gets a "<Model> · Weekly" section ---
 run_claudebar "$FABLE"
 assert_exit0 "fable: exit 0"; assert_json_valid "fable: valid JSON"
-assert_tip_has "fable: tooltip section" "Fable only"
+assert_tip_has "fable: tooltip section" "Fable · Weekly"
 assert_tip_has "fable: tooltip pct" "67%"
 assert_class "fable: 67% drives class mid" "mid"
 
@@ -31,7 +31,7 @@ run_claudebar '{'"$BASE"'}' --format 'n[{model_name}] p{model_pct}'
 assert_exit0 "no limits: exit 0"; assert_json_valid "no limits: valid JSON"
 assert_text_has "no limits: empty name, pct 0" "n[] p0"
 run_claudebar '{'"$BASE"'}'
-_plain .tooltip | grep -q " only" && _no "no limits: no model section" "tooltip has ' only'" || _ok "no limits: no model section"
+_plain .tooltip | grep -q " · Weekly" && _no "no limits: no model section" "tooltip has ' · Weekly'" || _ok "no limits: no model section"
 
 # --- weekly_scoped without a model scope is ignored ---
 SURF='{'"$BASE"',"limits":[{"kind":"weekly_scoped","percent":80,"resets_at":"2030-01-01T00:00:00+00:00","scope":{"model":null,"surface":"cowork"}}]}'
@@ -42,27 +42,27 @@ assert_exit0 "surface-scoped: exit 0"; assert_class "surface-scoped ignored: cla
 DUP='{'"$BASE"',"seven_day_sonnet":{"utilization":15,"resets_at":"2030-01-01T00:00:00+00:00"},"limits":[{"kind":"weekly_scoped","percent":15,"resets_at":"2030-01-01T00:00:00+00:00","scope":{"model":{"display_name":"Sonnet"}}}]}'
 run_claudebar "$DUP"
 assert_exit0 "sonnet dedup: exit 0"
-n=$(_plain .tooltip | grep -c "Sonnet only")
+n=$(_plain .tooltip | grep -c "Sonnet · Weekly")
 [[ "$n" == "1" ]] && _ok "sonnet dedup: single section" || _no "sonnet dedup: single section" "count=$n"
 
 # --- dedup must not shadow a later real model: [Sonnet dup, Fable] → both sections ---
 ORD='{'"$BASE"',"seven_day_sonnet":{"utilization":15,"resets_at":"2030-01-01T00:00:00+00:00"},"limits":[{"kind":"weekly_scoped","percent":15,"resets_at":"2030-01-01T00:00:00+00:00","scope":{"model":{"display_name":"Sonnet"}}},{"kind":"weekly_scoped","percent":67,"resets_at":"2030-01-01T00:00:00+00:00","scope":{"model":{"display_name":"Fable"}}}]}'
 run_claudebar "$ORD"
 assert_exit0 "sonnet-then-fable: exit 0"
-assert_tip_has "sonnet-then-fable: fable section survives" "Fable only"
-n=$(_plain .tooltip | grep -c "Sonnet only")
+assert_tip_has "sonnet-then-fable: fable section survives" "Fable · Weekly"
+n=$(_plain .tooltip | grep -c "Sonnet · Weekly")
 [[ "$n" == "1" ]] && _ok "sonnet-then-fable: sonnet not duplicated" || _no "sonnet-then-fable: sonnet not duplicated" "count=$n"
 
 # --- multiple model-scoped limits → one tooltip section per model ---
 MULTI='{'"$BASE"',"limits":[{"kind":"weekly_scoped","percent":67,"resets_at":"2030-01-01T00:00:00+00:00","scope":{"model":{"display_name":"Fable"}}},{"kind":"weekly_scoped","percent":89,"resets_at":"2030-01-01T00:00:00+00:00","scope":{"model":{"display_name":"Opus"}}}]}'
 run_claudebar "$MULTI"
 assert_exit0 "multi-model: exit 0"; assert_json_valid "multi-model: valid JSON"
-assert_tip_has "multi-model: first section" "Fable only"
-assert_tip_has "multi-model: second section" "Opus only"
+assert_tip_has "multi-model: first section" "Fable · Weekly"
+assert_tip_has "multi-model: second section" "Opus · Weekly"
 assert_class "multi-model: worst limit (89) drives class" "high"
 # each section carries its OWN values, not the first entry's
-_plain .tooltip | grep -A2 "Fable only" | grep -q "67%" && _ok "multi-model: fable has 67%" || _no "multi-model: fable has 67%" "$(_plain .tooltip | grep -A2 'Fable only')"
-_plain .tooltip | grep -A2 "Opus only" | grep -q "89%" && _ok "multi-model: opus has 89%" || _no "multi-model: opus has 89%" "$(_plain .tooltip | grep -A2 'Opus only')"
+_plain .tooltip | grep -A2 "Fable · Weekly" | grep -q "67%" && _ok "multi-model: fable has 67%" || _no "multi-model: fable has 67%" "$(_plain .tooltip | grep -A2 'Fable · Weekly')"
+_plain .tooltip | grep -A2 "Opus · Weekly" | grep -q "89%" && _ok "multi-model: opus has 89%" || _no "multi-model: opus has 89%" "$(_plain .tooltip | grep -A2 'Opus · Weekly')"
 
 # {model_*} placeholders track the FIRST entry
 run_claudebar "$MULTI" --format '{model_name} {model_pct}%'
@@ -83,16 +83,16 @@ done
 CAP='{'"$BASE"',"limits":['"${_entries%,}"']}'
 run_claudebar "$CAP"
 assert_exit0 "cap: exit 0"; assert_json_valid "cap: valid JSON"
-n=$(_plain .tooltip | grep -c " only")
+n=$(_plain .tooltip | grep -c " · Weekly")
 [[ "$n" == "4" ]] && _ok "cap: 6 entries render 4 sections" || _no "cap: 6 entries render 4 sections" "count=$n"
 
 # dedup composes with multi-model: [Sonnet dup, Fable, Opus] → all three, Sonnet once
 TRI='{'"$BASE"',"seven_day_sonnet":{"utilization":15,"resets_at":"2030-01-01T00:00:00+00:00"},"limits":[{"kind":"weekly_scoped","percent":15,"resets_at":"2030-01-01T00:00:00+00:00","scope":{"model":{"display_name":"Sonnet"}}},{"kind":"weekly_scoped","percent":67,"resets_at":"2030-01-01T00:00:00+00:00","scope":{"model":{"display_name":"Fable"}}},{"kind":"weekly_scoped","percent":30,"resets_at":"2030-01-01T00:00:00+00:00","scope":{"model":{"display_name":"Opus"}}}]}'
 run_claudebar "$TRI"
 assert_exit0 "tri-model dedup: exit 0"; assert_json_valid "tri-model dedup: valid JSON"
-assert_tip_has "tri-model dedup: fable shown" "Fable only"
-assert_tip_has "tri-model dedup: opus shown" "Opus only"
-n=$(_plain .tooltip | grep -c "Sonnet only")
+assert_tip_has "tri-model dedup: fable shown" "Fable · Weekly"
+assert_tip_has "tri-model dedup: opus shown" "Opus · Weekly"
+n=$(_plain .tooltip | grep -c "Sonnet · Weekly")
 [[ "$n" == "1" ]] && _ok "tri-model dedup: sonnet once" || _no "tri-model dedup: sonnet once" "count=$n"
 
 # --- Pango escaping of display_name ---
@@ -120,7 +120,7 @@ assert_exit0 "limits object: exit 0"; assert_class "limits object ignored: class
 # --- non-string display_name falls back to "Model" ---
 NUMNAME='{'"$BASE"',"limits":[{"kind":"weekly_scoped","percent":10,"resets_at":"2030-01-01T00:00:00+00:00","scope":{"model":{"display_name":7}}}]}'
 run_claudebar "$NUMNAME"
-assert_exit0 "numeric name: exit 0"; assert_tip_has "numeric name: Model fallback" "Model only"
+assert_exit0 "numeric name: exit 0"; assert_tip_has "numeric name: Model fallback" "Model · Weekly"
 
 # --- smoke: model window under the other flags ---
 run_claudebar "$FABLE" --remaining
@@ -135,7 +135,7 @@ assert_exit0 "--format-pace-color: exit 0"; assert_json_valid "--format-pace-col
 INJ='{'"$BASE"',"limits":[{"kind":"weekly_scoped","percent":10,"resets_at":"2030-01-01\n<span foreground=\"red\">X</span>\t99","scope":{"model":{"display_name":"Fable"}}}]}'
 run_claudebar "$INJ"
 assert_exit0 "resets_at injection: exit 0"; assert_json_valid "resets_at injection: valid JSON"
-n=$(_plain .tooltip | grep -c " only")
+n=$(_plain .tooltip | grep -c " · Weekly")
 [[ "$n" == "1" ]] && _ok "resets_at injection: single model row" || _no "resets_at injection: single model row" "count=$n"
 jq -r .tooltip <<<"$OUT" | grep -q '<span foreground="red">' && _no "resets_at injection: no raw Pango injected" "raw span leaked" || _ok "resets_at injection: no raw Pango injected"
 

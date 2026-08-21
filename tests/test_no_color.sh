@@ -120,8 +120,8 @@ _jq_is "unknown value in JSON mode: error message" '.error.message' '--no-color 
 
 echo "== structured JSON is unchanged with and without the flag"
 # Everything except the cache clock: each run gets a fresh fake HOME, so
-# updated_at/age_s legitimately move between invocations.
-_json_stable() { jq -S 'del(.cache.age_s, .cache.updated_at)' <<<"$1"; }
+# updated_at/data_age_seconds legitimately move between invocations.
+_json_stable() { jq -S 'del(.data_age_seconds, .updated_at)' <<<"$1"; }
 run_claudebar "$FX" --json;             plain_off=$(_json_stable "$OUT")
 run_claudebar "$FX" --json --no-color;  plain_on=$(_json_stable "$OUT")
 [[ "$plain_off" == "$plain_on" ]] && _ok "--json unchanged by --no-color" \

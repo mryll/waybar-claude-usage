@@ -1756,7 +1756,10 @@ else
         tip_sonnet_bar=$(display_bar "$sonnet_pct" "$sonnet_elapsed" "$TOOLTIP_PACE_PTS")
         sn_cd=$(countdown "$sonnet_reset")
         lines+=("")
-        lines+=(" <span foreground='${FG}'>  󱤔  Sonnet only</span>")
+        # "<model> · Weekly", the same name the Omarchy panel prints: the
+        # group is the meter, the label is the window inside it. "Sonnet only"
+        # said neither, and the two frontends of one product disagreed.
+        lines+=(" <span foreground='${FG}'>  󱤔  Sonnet · Weekly</span>")
         _lbl_n="$(display_pct "$sonnet_pct")%"
         lines+=("   ${tip_sonnet_bar}  $(_val_pad "$_lbl_n")<span font_weight='bold' foreground='${sonnet_color}'>${_lbl_n}</span>")
         lines+=(" <span foreground='${DIM}'>  󰥔  Resets in ${sn_cd}</span><span foreground='${DIM}'>  ·  ${sonnet_pace_indicator} ${sonnet_pace_pts}</span>")
@@ -1781,7 +1784,7 @@ else
         fi
         _mbar=$(display_bar "$_mp" "$_melapsed" "$TOOLTIP_PACE_PTS")
         lines+=("")
-        lines+=(" <span foreground='${FG}'>  󱤔  ${model_names_esc[$_mi]} only</span>")
+        lines+=(" <span foreground='${FG}'>  󱤔  ${model_names_esc[$_mi]} · Weekly</span>")
         _lbl_m="$(display_pct "$_mp")%"
         lines+=("   ${_mbar}  $(_val_pad "$_lbl_m")<span font_weight='bold' foreground='${_mcolor}'>${_lbl_m}</span>")
         lines+=(" <span foreground='${DIM}'>  󰥔  Resets in ${_mcd}</span><span foreground='${DIM}'>  ·  ${_mind} ${_mpts}</span>")
@@ -1790,13 +1793,16 @@ else
     if [[ "$extra_show" == "true" ]]; then
         lines+=("")
         lines+=("SEP")
-        lines+=(" <span foreground='${FG}'>  󰄑  Extra usage</span>")
+        # The rule already opened the section and the glyph already names it,
+        # so the headline row carries the label AND the data — the same shape
+        # codexbar's credits row uses. A separate "Extra usage" line above a
+        # line starting with the same glyph read as the section title twice.
         if [[ "$extra_balance_known" == "true" ]]; then
-            lines+=(" <span foreground='${DIM}'>  󰄑  Spent: ${extra_spent} / ${extra_funded}</span>  <span font_weight='bold' foreground='${extra_color}'>${extra_pct}%</span>")
+            lines+=(" <span foreground='${FG}'>  󰄑  Extra usage</span>  <span foreground='${DIM}'>${extra_spent} / ${extra_funded}</span>  <span font_weight='bold' foreground='${extra_color}'>${extra_pct}%</span>")
             lines+=("   ${format_extra_bar}")
             lines+=(" <span foreground='${DIM}'>  󰄰  Available: ${extra_available} · Monthly limit: ${extra_limit}</span>")
         else
-            lines+=(" <span foreground='${DIM}'>  󰄑  Spent: ${extra_spent} / —</span>")
+            lines+=(" <span foreground='${FG}'>  󰄑  Extra usage</span>  <span foreground='${DIM}'>${extra_spent} / —</span>")
             lines+=(" <span foreground='${DIM}'>  󰄰  Available: — · Monthly limit: ${extra_limit}</span>")
         fi
     fi

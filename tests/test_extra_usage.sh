@@ -52,7 +52,7 @@ assert_jq_value "funded: percent uses real pool" '.extra_usage.used_pct' '67'
 assert_jq_value "funded: monthly limit retained separately" '.extra_usage.monthly_limit_cents' '20000'
 
 run_claudebar_with_credits "$FUNDED" '{"amount":2500,"currency":"USD"}'
-assert_tip_has "funded tooltip: labels the real denominator" 'Spent: $50.05 / $75.05'
+assert_tip_has "funded tooltip: labels the real denominator" 'Extra usage  $50.05 / $75.05'
 assert_tip_has "funded tooltip: percent matches that denominator" '67%'
 assert_tip_has "funded tooltip: shows available credit" 'Available: $25.00'
 assert_tip_has "funded tooltip: keeps monthly limit" 'Monthly limit: $200.00'
