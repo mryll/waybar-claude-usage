@@ -5,7 +5,7 @@
 #
 # Usage: claudebar [--help] [--icon ICON] [--format FORMAT] [--tooltip-format FORMAT]
 #                  [--pace-tolerance N] [--format-pace-color] [--tooltip-pace-pts] [--remaining]
-#                  [--frame] [--frame-font FONT] [--no-color[=all|bar|tooltip]]
+#                  [--tooltip-font FONT] [--no-color[=all|bar|tooltip]]
 #                  [--color-low HEX] [--color-mid HEX] [--color-high HEX] [--color-critical HEX]
 #                  [--json] [--refresh]
 #
@@ -22,9 +22,22 @@
 #            See README "Structured JSON output".
 # --refresh  Bypass the 60s response cache and fetch fresh data from the API
 #            (the result still updates the cache for other instances).
-# --frame    Draw the tooltip as a bordered card instead of plain text. The box
-#            is built from Nerd Font glyphs; --frame-font FONT names the font
-#            Pango uses for them when the Waybar font has no box drawing.
+# --tooltip-font FONT
+#            Font family (or Pango family list) the tooltip is pinned to.
+#            Default: "JetBrainsMono Nerd Font Mono, JetBrainsMono Nerd Font,
+#            monospace". The tooltip needs a MONOSPACE font: its rules are made
+#            of box-drawing characters, which in a proportional font render far
+#            wider than letters, so the tooltip sizes itself to the rules and
+#            grows a dead margin to the right of the text. Waybar draws the
+#            tooltip in a GTK window that ignores font-family from CSS, so the
+#            markup is the only place this can be said.
+# --frame, --frame-font
+#            DEPRECATED, still accepted. --frame drew a bordered card around
+#            the tooltip and is now a no-op; --frame-font is an alias for
+#            --tooltip-font. The box was a second look for the same content —
+#            more code, more docs, more screenshots — and it only aligned when
+#            the pinned font was a complete Mono Nerd Font. Pinning the font on
+#            the one remaining tooltip gives the alignment without the box.
 # --no-color[=all|bar|tooltip]
 #            Monochrome output: no color markup on the chosen surface (default
 #            "all"). Everything structural stays — glyphs, bar characters,
@@ -116,8 +129,11 @@ BAR_COLOR_CRITICAL=""
 BAR_ICON=""
 FORMAT_PACE_COLOR=false
 TOOLTIP_PACE_PTS=false
-FRAME=false
-FRAME_FONT="JetBrainsMono Nerd Font Mono"
+# Una lista de familias, no una sola: Pango prueba en orden y cae en la
+# siguiente si la anterior no está instalada. El paquete de Arch
+# ttf-jetbrains-mono-nerd NO provee la familia "…Mono", así que fijar solo
+# ese nombre caía en la proporcional del sistema sin decir nada.
+TOOLTIP_FONT="JetBrainsMono Nerd Font Mono, JetBrainsMono Nerd Font, monospace"
 JSON_MODE=false
 FORCE_REFRESH=false
 NO_COLOR_SET=false
@@ -215,9 +231,14 @@ while [[ $# -gt 0 ]]; do
                 *) cli_error "--no-color must be all, bar, or tooltip" ;;
             esac
             shift ;;
-        --frame) FRAME=true; shift ;;
+        --tooltip-font) [[ $# -ge 2 ]] || cli_error "--tooltip-font requires a value"
+                        TOOLTIP_FONT="$2"; shift 2 ;;
+        # Deprecados. --frame dibujaba una caja alrededor del tooltip; se fue.
+        # Se siguen aceptando para no romper una config que ya los tenga:
+        # --frame no hace nada, --frame-font es un alias de --tooltip-font.
+        --frame) shift ;;
         --frame-font) [[ $# -ge 2 ]] || cli_error "--frame-font requires a value"
-                      FRAME_FONT="$2"; shift 2 ;;
+                      TOOLTIP_FONT="$2"; shift 2 ;;
         --color-low)       [[ $# -ge 2 ]] || cli_error "--color-low requires a value"
                            valid_color_spec "$2" || cli_error "--color-low must be a hex color (#RGB/#RRGGBB) or a color name"
                            BAR_COLOR_LOW="$2"; shift 2 ;;
@@ -1858,76 +1879,33 @@ else
     done
     INNER_W=$(( max_w + 1 ))
 
-    pad() {
-        local content="$1"
-        local plain=$(strip_tags "$content")
-        local len=${#plain}
-        local need=$(( INNER_W - len ))
-        (( need < 0 )) && need=0
-        local sp=""
-        printf -v sp '%*s' "$need" ''
-        printf '%s%s' "$content" "$sp"
-    }
-
-    center_pad() {
-        local content="$1"
-        local plain=$(strip_tags "$content")
-        local len=${#plain}
-        local total=$(( INNER_W - len ))
-        (( total < 0 )) && total=0
-        local lp=$(( total / 2 )) rp=$(( total - total / 2 ))
-        local ls="" rs=""
-        printf -v ls '%*s' "$lp" ''
-        printf -v rs '%*s' "$rp" ''
-        printf '%s%s%s' "$ls" "$content" "$rs"
-    }
-
-    L() { printf '%s' "${B}│${E}$(pad "$1")${B}│${E}"; }
-    LC() { printf '%s' "${B}│${E}$(center_pad "$1")${B}│${E}"; }
-
     # Build separator dynamically
     sep=""
     printf -v sep '%*s' "$(( INNER_W - 2 ))" ''; sep="${sep// /─}"
     sep=" <span foreground='${DIM}'>${sep}</span>"
 
-    border_h=""
-    printf -v border_h '%*s' "$INNER_W" ''; border_h="${border_h// /─}"
-
-    # Render tooltip
-    if [[ "$FRAME" == "true" ]]; then
-        # Framed: draw the box, then pin the whole tooltip to a complete Mono Nerd
-        # Font so text, box-drawing and icons share one uniform advance — alignment
-        # holds regardless of the user's bar font (needs JetBrainsMono Nerd Font Mono).
-        t=""
-        t+="${B}╭${border_h}╮${E}${NL}"
-        for line in "${lines[@]}"; do
-            if [[ "$line" == "SEP" ]]; then
-                t+="$(L "$sep")${NL}"
-            elif [[ "$line" == CENTER* ]]; then
-                t+="$(LC "${line#CENTER}")${NL}"
-            else
-                t+="$(L "$line")${NL}"
-            fi
-        done
-        t+="${B}╰${border_h}╯${E}"
-        _ff=$(sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/'\''/\&apos;/g' <<< "$FRAME_FONT")
-        t="<span font_family='${_ff}'>${t}</span>"
-    else
-        # Plain (default): no border, no font pin → renders in the user's font.
-        # Nothing is aligned to a right edge, so a non-Nerd font never misaligns.
-        t=""
-        for line in "${lines[@]}"; do
-            if [[ "$line" == "SEP" ]]; then
-                t+="${sep}${NL}"
-            elif [[ "$line" == CENTER* ]]; then
-                # Leading space aligns the title with the rule and section headers.
-                t+=" ${line#CENTER}${NL}"
-            else
-                t+="${line}${NL}"
-            fi
-        done
-        t="${t%"$NL"}"
-    fi
+    # Una sola forma de tooltip, con la fuente fijada.
+    #
+    # El pin no es decoración: las reglas están hechas de ─, y en una fuente
+    # proporcional ese carácter mide casi el doble que una letra. El tooltip
+    # entonces se dimensiona por las reglas y le queda un margen muerto a la
+    # derecha del texto. Waybar renderiza el tooltip en una ventana GTK que
+    # IGNORA font-family del CSS, así que el markup es el único lugar donde
+    # esto se puede decir.
+    t=""
+    for line in "${lines[@]}"; do
+        if [[ "$line" == "SEP" ]]; then
+            t+="${sep}${NL}"
+        elif [[ "$line" == CENTER* ]]; then
+            # Leading space aligns the title with the rule and section headers.
+            t+=" ${line#CENTER}${NL}"
+        else
+            t+="${line}${NL}"
+        fi
+    done
+    t="${t%"$NL"}"
+    _tf=$(sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/'"'"'/\&apos;/g' <<< "$TOOLTIP_FONT")
+    t="<span font_family='${_tf}'>${t}</span>"
 fi
 
 # Monochrome tooltip: strip color from the finished markup, whichever path

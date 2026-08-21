@@ -23,6 +23,11 @@ assert_has() {  # <name> <jq-field> <needle>
     /usr/bin/grep -qF -- "$3" <<<"$(_field "$2")" && _ok "$1" || _no "$1" "$2 lacks: $3"
 }
 
+assert_lacks() {  # <name> <jq-field> <needle>
+    local v; v=$(jq -r "$2" <<<"$OUT")
+    grep -qF -- "$3" <<<"$v" && _no "$1" "still contains: $3" || _ok "$1"
+}
+
 echo "== the four states"
 run_claudebar "$FX"
 assert_colored "default: bar colored"      .text
@@ -143,9 +148,15 @@ run_claudebar "$FX" --no-color --remaining
 assert_exit0  "--no-color --remaining: exit 0"
 assert_plain  "--no-color --remaining: bar plain"     .text
 assert_plain  "--no-color --remaining: tooltip plain" .tooltip
+# --frame is deprecated and a no-op: it must still be ACCEPTED (an existing
+# Waybar config keeps working) and must change nothing.
 run_claudebar "$FX" --no-color --frame
 assert_plain  "--no-color --frame: tooltip plain"     .tooltip
-assert_has    "--no-color --frame: keeps the box"     .tooltip "╭"
+assert_lacks  "--no-color --frame: draws no box"      .tooltip "╭"
+_with_frame=$(jq -r .tooltip <<<"$OUT")
+run_claudebar "$FX" --no-color
+[[ "$(jq -r .tooltip <<<"$OUT")" == "$_with_frame" ]] \
+    && _ok "--frame changes nothing" || _no "--frame changes nothing" "tooltip differs"
 run_claudebar "$FX" --no-color --format-pace-color --format '{session_pace_delta}'
 assert_plain  "--no-color beats --format-pace-color"  .text
 

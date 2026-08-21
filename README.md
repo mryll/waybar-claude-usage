@@ -3,16 +3,26 @@
 [![AUR version](https://img.shields.io/aur/version/claudebar)](https://aur.archlinux.org/packages/claudebar)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-claudebar is a Waybar widget that shows how much of your Claude AI plan you have used. It shows the session limit, the weekly limit and the per-model limits. Each one has a progress bar, a color for the level of use, and the time until it resets.
+claudebar shows how much of your Claude AI plan you have used, in [Waybar](https://github.com/Alexays/Waybar) and in the [Omarchy](https://omarchy.org) shell. It shows the session limit, the weekly limit and the per-model limits. Each one has a progress bar, a color for the level of use, and the time until it resets.
 
-<p align="center">
-  <img src="screenshots/waybar-bar.png" alt="claudebar in Waybar" width="144">
-</p>
+The same core drives both frontends, so a number reads the same on either one:
 
-<p align="center">
-  <em>A compact line in your bar. Move the pointer onto it to see all the limits:</em><br><br>
-  <img src="screenshots/waybar-tooltip.png" alt="claudebar tooltip" width="468">
-</p>
+| The Omarchy shell plugin | The Waybar module |
+| :---: | :---: |
+| <img src="screenshots/omarchy-desktop.png" alt="claudebar in the Omarchy shell: the bar face and the usage panel"> | <img src="screenshots/waybar-desktop.png" alt="claudebar in Waybar: the bar face and the tooltip"> |
+
+## Contents
+
+- [Features](#features)
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Quick start](#quick-start)
+- [Omarchy shell plugin](#omarchy-shell-plugin)
+- [Configuration](#configuration)
+- [Structured JSON output](#structured-json-output)
+- [How it works](#how-it-works)
+- [Troubleshooting](#troubleshooting)
+- [Related](#related)
 
 ## Features
 
@@ -92,16 +102,21 @@ Add the module to your `~/.config/waybar/config.jsonc` file:
 
 Run `claudebar --help` for the full reference: the usage line, every flag, and the format placeholders.
 
+<p align="center">
+  <img src="screenshots/waybar-bar.png" alt="claudebar in Waybar" width="144">
+</p>
+
+<p align="center">
+  <em>A compact line in your bar. Move the pointer onto it to see all the limits:</em><br><br>
+  <img src="screenshots/waybar-tooltip.png" alt="The claudebar tooltip, with one bar for each limit" width="468">
+</p>
+
 > [!WARNING]
 > The OAuth usage endpoint and the prepaid-credit endpoint are not documented. The usage endpoint has strict rate limits. An interval of less than 300 seconds will usually cause HTTP 429 errors. Errors are also possible at 300 seconds if the Anthropic service has a problem. If this occurs, the widget shows the data from the cache with a `` pause sign. If the balance is not available, the widget shows it as unknown. It does not show the monthly limit in its place. Refer to [claude-code#30930](https://github.com/anthropics/claude-code/issues/30930).
 
 ## Omarchy shell plugin
 
 claudebar also has a native plugin for the Quickshell bar of the [Omarchy](https://omarchy.org) shell. The plugin is in the `omarchy/` directory of this repository. The bar shows the Claude glyph and a short usage percentage. A click opens a panel with one section for each limit. The footer of the panel ends with a refresh control (󰑐), next to the time of the last update. The control stays disabled while a fetch runs.
-
-<p align="center">
-  <img src="screenshots/omarchy-desktop.png" alt="claudebar in the Omarchy bar, with its panel open" width="960">
-</p>
 
 <p align="center">
   <img src="screenshots/omarchy-panel.png" alt="The claudebar panel in the Omarchy shell" width="342">
@@ -115,7 +130,7 @@ Each meter paints a color gauge along its full length and fills it up to the cur
   <img src="screenshots/omarchy-bar.png" alt="The claudebar widget in the Omarchy bar" width="68">
 </p>
 
-A small dot appears next to the percentage when a limit that is *not* on the bar becomes critical (90% or more). Thus a per-model limit that is almost full still gets your attention while the bar shows a comfortable session number. Move the pointer onto the widget and a tooltip gives the name of that limit, for example `Fable only: 100%`. When there is no dot, there is no tooltip, and the panel stays the full view of the data.
+A small dot appears next to the percentage when a limit that is *not* on the bar becomes critical (90% or more). Thus a per-model limit that is almost full still gets your attention while the bar shows a comfortable session number. Move the pointer onto the widget and a tooltip gives the name of that limit, for example `Fable · Weekly: 100%`. When there is no dot, there is no tooltip, and the panel stays the full view of the data.
 
 Mouse and keyboard controls:
 
@@ -125,6 +140,13 @@ Mouse and keyboard controls:
 | Middle click | Get new data now. This ignores the 60-second cache. |
 | Right click | Open the claude.ai usage page |
 | `r` or Enter, in the panel | Get new data now |
+
+The plugin also answers the shell's IPC, so a keybind or a script can drive it without the mouse:
+
+```bash
+qs ipc call mryll.claudebar toggle    # open or close the panel
+qs ipc call mryll.claudebar refresh   # fetch now, without opening anything
+```
 
 ### Install the plugin
 
@@ -453,7 +475,7 @@ If 30% of the session time has passed, an even use is 30% of the quota. The scri
 | Fully even | 50% | 50% | on the pace | → |
 | Slow use | 70% | 30% | 57% under | ↓ |
 
-The default band is **±5%**. A difference of 5% or less shows as "on track". Change the band with `--pace-tolerance`:
+The default band is **±5%**. A difference of 5% or less shows as "on pace". Change the band with `--pace-tolerance`:
 
 ```bash
 # More sensitive (±2%) — flags smaller deviations
@@ -463,7 +485,7 @@ claudebar --pace-tolerance 2
 claudebar --pace-tolerance 10
 ```
 
-The `{session_pace_pct}` and `{weekly_pace_pct}` placeholders show the difference, for example "12% ahead", "5% under" or "on track".
+The `{session_pace_pct}` and `{weekly_pace_pct}` placeholders show the difference, for example "12% ahead", "5% under" or "on pace".
 
 #### Pace in points
 
@@ -609,11 +631,12 @@ The script keeps the API response in `~/.cache/claudebar/usage.json` for 60 seco
 
 ## Related
 
-- [codexbar](https://github.com/mryll/codexbar) — OpenAI Codex usage widget for Waybar
-- [logibar](https://github.com/mryll/logibar) — Logitech battery widgets for Waybar
-- [meteobar](https://github.com/mryll/meteobar) — Weather widget for Waybar (Open-Meteo)
-- [tickerbar](https://github.com/mryll/tickerbar) — Multi-market price ticker for Waybar (crypto, stocks, forex)
-- [ClaudeBar](https://github.com/andresreibel/ClaudeBar) — Similar widget in TypeScript and Bun
-- [waybar-ai-usage](https://github.com/NihilDigit/waybar-ai-usage) — Claude and Codex monitor (Python, uses browser cookies)
-- [Omarchy](https://github.com/basecamp/omarchy) — Beautiful, modern and opinionated Linux distribution
-- [Waybar](https://github.com/Alexays/Waybar) — Status bar for Wayland compositors
+- [codexbar](https://github.com/mryll/codexbar) — OpenAI Codex subscription usage
+- [logibar](https://github.com/mryll/logibar) — the battery of Logitech devices
+- [meteobar](https://github.com/mryll/meteobar) — the weather, from Open-Meteo
+- [printbar](https://github.com/mryll/printbar) — any printer: supplies, trays and queue
+- [tickerbar](https://github.com/mryll/tickerbar) — prices of crypto, stocks, indices, commodities and forex
+- [ClaudeBar](https://github.com/andresreibel/ClaudeBar) — a similar widget in TypeScript and Bun
+- [waybar-ai-usage](https://github.com/NihilDigit/waybar-ai-usage) — a Claude and Codex monitor in Python, which uses browser cookies
+- [Omarchy](https://github.com/basecamp/omarchy) — the Linux setup for these widgets
+- [Waybar](https://github.com/Alexays/Waybar) — the status bar for Wayland
