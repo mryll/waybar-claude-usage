@@ -29,7 +29,7 @@
         "key": "refreshIntervalSec",
         "type": "integer",
         "label": "Refresh interval (seconds)",
-        "description": "How often to run claudebar. The API response is cached for 60s; intervals below 300s may hit API rate limits.",
+        "description": "How often to re-run the CLI. The API response is cached for 60s, so anything below that re-reads the same cached answer. Opening the panel and middle-clicking the bar both force a fresh fetch regardless.",
         "min": 60,
         "max": 3600,
         "step": 30,
@@ -38,15 +38,15 @@
       {
         "key": "showLabel",
         "type": "boolean",
-        "label": "Show usage % on the bar",
-        "description": "Show a compact usage percentage next to the icon (horizontal bars only).",
+        "label": "Show usage % next to the icon",
+        "description": "Horizontal bars only. A vertical bar always shows just the icon; the panel is one click away either way.",
         "defaultValue": true
       },
       {
         "key": "colorMode",
         "type": "enum",
         "label": "Colors",
-        "description": "Monochrome rendering uses foreground tones only. Severity stays readable through the numbers and glyphs.",
+        "description": "Monochrome rendering uses foreground tones only — severity stays readable through the numbers and glyphs. none: no color anywhere. bar-only: colored bar face, plain panel. panel-only: the reverse.",
         "options": [
           "full",
           "none",
@@ -58,8 +58,8 @@
       {
         "key": "barWindow",
         "type": "enum",
-        "label": "Bar label window",
-        "description": "Which usage window drives the percentage shown on the bar.",
+        "label": "Window shown on the bar",
+        "description": "Which usage window drives the percentage shown on the bar. Any other window that runs out still reaches you through the alarm dot and the panel.",
         "options": [
           "Session",
           "Weekly"
