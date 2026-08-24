@@ -1757,9 +1757,8 @@ if [[ -n "$TOOLTIP_FORMAT" ]]; then
     t=$(apply_format "$TOOLTIP_FORMAT")
     [[ -n "$_stale_note" ]] && t+=$'\n'"<span foreground='${ORANGE}'>${_stale_note}</span>"
 else
-    # Default rich Pango tooltip — tooltip-specific bars may carry an elapsed marker.
-    tip_session_bar=$(display_bar "$session_pct" "$session_elapsed" "$TOOLTIP_PACE_PTS")
-    tip_weekly_bar=$(display_bar "$weekly_pct" "$weekly_elapsed" "$TOOLTIP_PACE_PTS")
+    # Default rich Pango tooltip. The meters are parked and resolved after
+    # the width pass — refer to add_meter below.
     s_cd="$s_cd_val"
     w_cd="$w_cd_val"
 
@@ -1769,8 +1768,33 @@ else
 
     strip_tags() { sed 's/<[^>]*>//g' <<< "$1"; }
 
-    # Right-align a plain value label to a fixed column (width 6 fits "100% ↑").
-    _val_pad() { local w=6 n=${#1}; (( n > w )) && w=$n; printf '%*s' $(( w - n )) ''; }
+    # --- The meter row spans the tooltip ---------------------------------
+    # A meter row is <indent><bar><gap><value>, and the value is right-aligned
+    # on the tooltip's inner width — the same column the longest text line
+    # ends on. The bar length therefore depends on the WIDEST line, which is
+    # not known while the lines are still being collected. So a meter parks a
+    # placeholder in `lines` plus one entry in the parallel arrays below, and
+    # the resolution happens after the width pass.
+    #
+    # Parallel arrays, not one packed token: the value labels and colors are
+    # markup-adjacent, and splitting a packed record back apart in bash is one
+    # quoting bug waiting to happen.
+    TIP_IND=3           # spaces before the bar
+    TIP_VAL=6           # value column, wide enough for "100% ↑"
+    TIP_GAP_MIN=2       # smallest gap between the bar and the value
+    TIP_BAR_MIN=20      # a short tooltip still gets a readable bar
+    TIP_BAR_MAX=48      # one long line must not stretch the bar into a ruler
+    meter_pct=() meter_elapsed=() meter_mode=() meter_color=() meter_label=()
+    add_meter() {  # add_meter <pct> <elapsed> <mode> <value_color> <value_label>
+        # mode: "tip"  -> display_bar (respects --remaining and the pace marker)
+        #       "flat" -> make_bar with the usage gradient and no marker
+        # An empty <value_label> draws the bar with no value column, for a
+        # meter whose number already sits on the header row above it. It keeps
+        # the family bar length: a shorter bar would read as another scale.
+        meter_pct+=("$1"); meter_elapsed+=("$2"); meter_mode+=("$3")
+        meter_color+=("$4"); meter_label+=("$5")
+        lines+=("METER:$(( ${#meter_pct[@]} - 1 ))")
+    }
 
     # Collect all content lines into an array
     lines=()
@@ -1781,20 +1805,19 @@ else
     lines+=("")
     lines+=(" <span foreground='${FG}'>  󰔟  Session</span>")
     _lbl_s="$(display_pct "$session_pct")%"
-    lines+=("   ${tip_session_bar}  $(_val_pad "$_lbl_s")<span font_weight='bold' foreground='${session_color}'>${_lbl_s}</span>")
+    add_meter "$session_pct" "$session_elapsed" tip "$session_color" "$_lbl_s"
     # El pacing vive con el texto que lo explica, no pegado al %: "34% ↓"
     # se lee como si el USO hubiera bajado. Misma forma que el panel.
     lines+=(" <span foreground='${DIM}'>  󰥔  Resets in ${s_cd}</span><span foreground='${DIM}'>  ·  ${session_pace_indicator} ${session_pace_pts}</span>")
     lines+=("")
     lines+=(" <span foreground='${FG}'>  󰃰  Weekly</span>")
     _lbl_w="$(display_pct "$weekly_pct")%"
-    lines+=("   ${tip_weekly_bar}  $(_val_pad "$_lbl_w")<span font_weight='bold' foreground='${weekly_color}'>${_lbl_w}</span>")
+    add_meter "$weekly_pct" "$weekly_elapsed" tip "$weekly_color" "$_lbl_w"
     # El pacing vive con el texto que lo explica, no pegado al %: "34% ↓"
     # se lee como si el USO hubiera bajado. Misma forma que el panel.
     lines+=(" <span foreground='${DIM}'>  󰥔  Resets in ${w_cd}</span><span foreground='${DIM}'>  ·  ${weekly_pace_indicator} ${weekly_pace_pts}</span>")
 
     if [[ "$has_sonnet" == "true" ]]; then
-        tip_sonnet_bar=$(display_bar "$sonnet_pct" "$sonnet_elapsed" "$TOOLTIP_PACE_PTS")
         sn_cd=$(countdown "$sonnet_reset")
         lines+=("")
         # "<model> · Weekly", the same name the Omarchy panel prints: the
@@ -1802,7 +1825,7 @@ else
         # said neither, and the two frontends of one product disagreed.
         lines+=(" <span foreground='${FG}'>  󱤔  Sonnet · Weekly</span>")
         _lbl_n="$(display_pct "$sonnet_pct")%"
-        lines+=("   ${tip_sonnet_bar}  $(_val_pad "$_lbl_n")<span font_weight='bold' foreground='${sonnet_color}'>${_lbl_n}</span>")
+        add_meter "$sonnet_pct" "$sonnet_elapsed" tip "$sonnet_color" "$_lbl_n"
         lines+=(" <span foreground='${DIM}'>  󰥔  Resets in ${sn_cd}</span><span foreground='${DIM}'>  ·  ${sonnet_pace_indicator} ${sonnet_pace_pts}</span>")
     fi
 
@@ -1823,11 +1846,10 @@ else
             _mcolor=$(color_for "$_mp")
             _mcd=$(countdown "${model_resets[$_mi]}")
         fi
-        _mbar=$(display_bar "$_mp" "$_melapsed" "$TOOLTIP_PACE_PTS")
         lines+=("")
         lines+=(" <span foreground='${FG}'>  󱤔  ${model_names_esc[$_mi]} · Weekly</span>")
         _lbl_m="$(display_pct "$_mp")%"
-        lines+=("   ${_mbar}  $(_val_pad "$_lbl_m")<span font_weight='bold' foreground='${_mcolor}'>${_lbl_m}</span>")
+        add_meter "$_mp" "$_melapsed" tip "$_mcolor" "$_lbl_m"
         lines+=(" <span foreground='${DIM}'>  󰥔  Resets in ${_mcd}</span><span foreground='${DIM}'>  ·  ${_mind} ${_mpts}</span>")
     done
 
@@ -1840,7 +1862,7 @@ else
         # line starting with the same glyph read as the section title twice.
         if [[ "$extra_balance_known" == "true" ]]; then
             lines+=(" <span foreground='${FG}'>  󰄑  Extra usage</span>  <span foreground='${DIM}'>${extra_spent} / ${extra_funded}</span>  <span font_weight='bold' foreground='${extra_color}'>${extra_pct}%</span>")
-            lines+=("   ${format_extra_bar}")
+            add_meter "$extra_pct_value" 0 flat "" ""
             lines+=(" <span foreground='${DIM}'>  󰄰  Available: ${extra_available} · Monthly limit: ${extra_limit}</span>")
         else
             lines+=(" <span foreground='${FG}'>  󰄑  Extra usage</span>  <span foreground='${DIM}'>${extra_spent} / —</span>")
@@ -1889,15 +1911,62 @@ else
     lines+=("SEP")
     lines+=(" <span foreground='${DIM}'>  󰅐  Updated ${_updated}</span>${_stale_suffix}")
 
-    # Calculate max width from content
+    # Calculate max width from content. The meters are skipped: their width is
+    # DERIVED from this number, so measuring them here would be circular.
     max_w=0
     for line in "${lines[@]}"; do
-        [[ "$line" == "SEP" ]] && continue
+        [[ "$line" == "SEP" || "$line" == METER:* ]] && continue
         [[ "$line" == CENTER* ]] && line="${line#CENTER}"
         plain=$(strip_tags "$line")
         (( ${#plain} > max_w )) && max_w=${#plain}
     done
     INNER_W=$(( max_w + 1 ))
+
+    # ONE bar length for the whole tooltip. The meters stack, so a reader
+    # compares them against each other; a per-row length would turn that
+    # comparison into a lie.
+    # A rule carries one leading space and INNER_W-2 cells, so it ends on
+    # column INNER_W-1. THAT column is the tooltip's right edge, and the value
+    # has to land on it — not on INNER_W, which nothing else reaches.
+    tip_right=$(( INNER_W - 1 ))
+    tip_bar_len=$(( tip_right - TIP_IND - TIP_GAP_MIN - TIP_VAL ))
+    (( tip_bar_len < TIP_BAR_MIN )) && tip_bar_len=$TIP_BAR_MIN
+    (( tip_bar_len > TIP_BAR_MAX )) && tip_bar_len=$TIP_BAR_MAX
+    # A clamp at the low end makes the meter row wider than every text line, so
+    # the rules grow to match it and the right edge stays one straight line.
+    _row_w=$(( TIP_IND + tip_bar_len + TIP_GAP_MIN + TIP_VAL ))
+    if (( _row_w > tip_right )); then tip_right=$_row_w; INNER_W=$(( tip_right + 1 )); fi
+
+    # make_bar and the gradient read BAR_LEN. The bar TEXT is already built at
+    # this point, so the tooltip is free to move it — but GRAD_CELLS is indexed
+    # by cell position, so it has to be rebuilt for the new length. Without the
+    # rebuild a longer bar reads past the end of the array, which is fatal
+    # under `set -u`.
+    BAR_LEN=$tip_bar_len
+    GRAD_CELLS=(); init_grad_cells
+
+    # Resolve the parked meters now that the geometry is known.
+    printf -v _tip_ind '%*s' "$TIP_IND" ''
+    for _mi_r in "${!lines[@]}"; do
+        [[ "${lines[$_mi_r]}" == METER:* ]] || continue
+        _m=${lines[$_mi_r]#METER:}
+        if [[ "${meter_mode[$_m]}" == "flat" ]]; then
+            _mbar=$(make_bar "${meter_pct[$_m]}" "")
+        else
+            _mbar=$(display_bar "${meter_pct[$_m]}" "${meter_elapsed[$_m]}" "$TOOLTIP_PACE_PTS")
+        fi
+        _mlbl="${meter_label[$_m]}"
+        if [[ -z "$_mlbl" ]]; then
+            lines[$_mi_r]="${_tip_ind}${_mbar}"
+            continue
+        fi
+        # The gap absorbs the label's own width, so the LAST character of the
+        # value lands on INNER_W whatever the label says.
+        _mpad=$(( tip_right - TIP_IND - tip_bar_len - ${#_mlbl} ))
+        (( _mpad < 1 )) && _mpad=1
+        printf -v _mgap '%*s' "$_mpad" ''
+        lines[$_mi_r]="${_tip_ind}${_mbar}${_mgap}<span font_weight='bold' foreground='${meter_color[$_m]}'>${_mlbl}</span>"
+    done
 
     # Build separator dynamically
     sep=""
