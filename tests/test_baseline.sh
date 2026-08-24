@@ -5,7 +5,7 @@
 # release changes the output on purpose), same instant (tooltip embeds wall-clock
 # time), over a matrix of fixtures × existing flags.
 source "$(dirname "$0")/lib.sh"
-BASE_REF="${BASE_REF:-d968280}"   # the tooltip pins its font and stops depending on the locale
+BASE_REF="${BASE_REF:-ba67db1}"   # the tooltip meter reaches the right edge
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 # Since the continuous-gradient release, tooltip colors are interpolated per
 # percentage and usage bars are colored per cell, so Pango span colors and span
@@ -61,7 +61,7 @@ cmp_same "baseline EXTRA custom --tooltip-format" "$EXTRA" --tooltip-format '{se
 
 # --- v0.7.0 baseline: zero- and one-model limits[] payloads must render
 # byte-identically to the first model-scoped release (BASE_REF predates limits[]).
-MODEL_BASE_REF="${MODEL_BASE_REF:-d968280}"   # the tooltip pins its font and stops depending on the locale
+MODEL_BASE_REF="${MODEL_BASE_REF:-ba67db1}"   # same
 git -C "$REPO" show "$MODEL_BASE_REF:claudebar" > "$base" || { echo "FATAL: cannot extract $MODEL_BASE_REF:claudebar" >&2; rm -f "$base"; exit 1; }
 FAB='{"five_hour":{"utilization":42,"resets_at":"2030-01-01T00:00:00+00:00"},"seven_day":{"utilization":27,"resets_at":"2030-01-01T00:00:00+00:00"},"limits":[{"kind":"weekly_scoped","percent":67,"resets_at":"2030-01-01T00:00:00+00:00","scope":{"model":{"display_name":"Fable"}}}]}'
 for fx_name in MIN FAB; do
