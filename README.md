@@ -45,7 +45,7 @@ The same core drives both frontends, so a number reads the same on either one:
 - A Claude Pro or Max subscription.
 - `curl`, `jq` and GNU `date`. These are standard on most Linux systems.
 - [Waybar](https://github.com/Alexays/Waybar).
-- A [Nerd Font](https://www.nerdfonts.com/) for the tooltip icons. It is necessary only for the framed tooltip. Refer to [Framed tooltip](#framed-tooltip).
+- A [Nerd Font](https://www.nerdfonts.com/) for the tooltip icons, and for the rules that line up its columns. Refer to [Tooltip font](#tooltip-font).
 - Optional: [Font Awesome](https://fontawesome.com/) 7.2.0 or later, in OTF format, for the Claude brand icon.
 
 ## Installation
@@ -534,19 +534,28 @@ With --tooltip-pace-pts:
 
 The color of the marker follows the active theme. Without this flag, the tooltip does not change.
 
-### Framed tooltip
+### Tooltip font
 
-The default tooltip is **plain**, with no border, and it uses your Waybar font. Thus it looks correct with all fonts. Use `--frame` to draw the tooltip as a card with a border:
+The tooltip is pinned to a monospace font. That is not decoration: its rules are box-drawing characters, and in a proportional font one of those is nearly twice as wide as a letter. The tooltip then sizes itself to the rules, and a dead margin opens to the right of the text. Waybar draws the tooltip in a GTK window that ignores `font-family` from your CSS, so the markup is the only place this can be said.
 
-```bash
-claudebar --frame
+The default is a **list** of families, tried in order:
+
+```
+JetBrainsMono Nerd Font Mono, JetBrainsMono Nerd Font, monospace
 ```
 
-The framed tooltip uses `JetBrainsMono Nerd Font Mono` by default. This keeps the box, the bars and the icons in line, whichever font your bar uses. If you do not have that font, or if you prefer a different one, give `--frame-font` a name. Use any complete Mono Nerd Font on your system:
+Pango falls through to the next name when one is not installed. This matters: the Arch package `ttf-jetbrains-mono-nerd` does **not** ship the `…Mono` family, so pinning that one name alone used to fall back to your system's proportional font without saying so.
+
+To use a different font, name any monospace family (or your own list):
 
 ```bash
-claudebar --frame --frame-font "FiraCode Nerd Font Mono"
+claudebar --tooltip-font "FiraCode Nerd Font Mono"
 ```
+
+> [!NOTE]
+> **`--frame` and `--frame-font` are deprecated.** `--frame` drew the tooltip as a bordered card. It is still accepted, so an existing Waybar config keeps working, but it now does nothing; `--frame-font` is an alias for `--tooltip-font`.
+>
+> The box was a second way of drawing the same content — more code, more documentation, more screenshots — and it only lined up when the pinned font was a complete Mono Nerd Font. Pinning the font on the one remaining tooltip gives the alignment without the box.
 
 ### Space around the widget
 
