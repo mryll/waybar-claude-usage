@@ -57,4 +57,16 @@ jq -r .tooltip <<<"$OUT" | grep -qF '\n' \
     && _ok "loading tooltip is two real lines" \
     || _no "loading tooltip is two real lines" "$(jq -r .tooltip <<<"$OUT")"
 
+echo "== the tooltip does not depend on the caller's locale"
+# ${#var} counts BYTES under a C locale, so every multibyte glyph — the bar
+# cells █░, the Nerd Font icons — used to inflate a line's measured width and
+# the rules were drawn ~20 characters longer than the text they underline.
+# Waybar started from a systemd unit with no locale is exactly this case.
+_widest() { jq -r .tooltip <<<"$1" | sed 's/<[^>]*>//g' | awk '{print length($0)}' | sort -rn | head -1; }
+LC_ALL=en_US.UTF-8 run_claudebar "$MIN"; _utf8=$(_widest "$OUT")
+LC_ALL=C           run_claudebar "$MIN"; _c=$(_widest "$OUT")
+[[ "$_utf8" == "$_c" && -n "$_utf8" ]] \
+    && _ok "the rules are the same width under C and UTF-8 ($_utf8)" \
+    || _no "the rules are the same width under C and UTF-8" "utf8=$_utf8 C=$_c"
+
 finish

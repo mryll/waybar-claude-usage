@@ -116,6 +116,26 @@
 
 set -euo pipefail
 
+# Character counting must not depend on the caller's locale. ${#var} counts
+# BYTES under a C locale, so every multibyte glyph in the tooltip — the bar
+# cells █░, the Nerd Font icons, the box-drawing rules — inflates a line's
+# measured width. The rules are drawn to that width, so they end up ~20
+# characters longer than the text they underline and the tooltip grows a dead
+# margin on its right. Waybar started from a systemd unit with no locale is
+# exactly this case. LC_CTYPE alone is the surgical fix: it governs character
+# classification, and leaves collation and number formatting to the user.
+if [[ "$(locale charmap 2>/dev/null)" != "UTF-8" ]]; then
+    # LC_ALL outranks LC_CTYPE, so it has to go first — otherwise the override
+    # below is silently ignored. Dropping it here affects only this process.
+    unset LC_ALL
+    for _loc in C.UTF-8 C.utf8 en_US.UTF-8; do
+        if LC_CTYPE="$_loc" locale charmap 2>/dev/null | grep -qx "UTF-8"; then
+            export LC_CTYPE="$_loc"; break
+        fi
+    done
+    unset _loc
+fi
+
 # --- Parse args ---
 FORMAT="{session_pct}% · {session_reset}"
 TOOLTIP_FORMAT=""
