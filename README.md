@@ -103,12 +103,12 @@ Add the module to your `~/.config/waybar/config.jsonc` file:
 Run `claudebar --help` for the full reference: the usage line, every flag, and the format placeholders.
 
 <p align="center">
-  <img src="screenshots/waybar-bar.png" alt="claudebar in Waybar" width="144">
+  <img src="screenshots/waybar-bar.png" alt="claudebar in Waybar" width="95">
 </p>
 
 <p align="center">
   <em>A compact line in your bar. Move the pointer onto it to see all the limits:</em><br><br>
-  <img src="screenshots/waybar-tooltip.png" alt="The claudebar tooltip, with one bar for each limit" width="468">
+  <img src="screenshots/waybar-tooltip.png" alt="The claudebar tooltip, with one bar for each limit" width="383">
 </p>
 
 > [!WARNING]
@@ -127,7 +127,7 @@ Each section has an animated progress bar, the percentage, the countdown to the 
 Each meter paints a color gauge along its full length and fills it up to the current value. The meter reads like a thermometer against a scale. It does not change its color as one block. The CLI resolves the gauge and sends it in the `palette` field of its JSON output: the colors and also the percentages where they turn. The panel reads those stops and calculates the colors between them. Thus one change in the core moves the tooltip and the panel together. Each number takes the color of the gauge at its own value, so the number and its meter always agree.
 
 <p align="center">
-  <img src="screenshots/omarchy-bar.png" alt="The claudebar widget in the Omarchy bar" width="68">
+  <img src="screenshots/omarchy-bar.png" alt="The claudebar widget in the Omarchy bar" width="57">
 </p>
 
 A small dot appears next to the percentage when a limit that is *not* on the bar becomes critical (90% or more). Thus a per-model limit that is almost full still gets your attention while the bar shows a comfortable session number. Move the pointer onto the widget and a tooltip gives the name of that limit, for example `Fable · Weekly: 100%`. When there is no dot, there is no tooltip, and the panel stays the full view of the data.
@@ -309,7 +309,7 @@ Do you prefer a bar without color? `--no-color` removes the color from all surfa
 | `--no-color=tooltip` | color | plain |
 
 <p align="center">
-  <img src="screenshots/waybar-tooltip-mono.png" alt="The claudebar tooltip with --no-color" width="468">
+  <img src="screenshots/waybar-tooltip-mono.png" alt="The claudebar tooltip with --no-color" width="383">
 </p>
 
 Plain means no color markup. Nothing else changes. The progress bars, the markers, the icons, the box lines, the bold text and all the numbers stay in their positions. The flag also removes color markup that you wrote yourself in a `--format` or `--tooltip-format` value.
