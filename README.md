@@ -150,7 +150,19 @@ qs ipc call mryll.claudebar refresh   # fetch now, without opening anything
 
 ### Install the plugin
 
-The `claudebar` command must be on your PATH. Refer to [Installation](#installation).
+From the marketplace, or from this repository directly:
+
+```bash
+omarchy plugin add https://github.com/mryll/claudebar.git --enable
+```
+
+That clones the repository into `~/.config/omarchy/plugins/mryll.claudebar` and
+validates the manifest before it is enabled. To remove it later:
+`omarchy plugin remove mryll.claudebar`.
+
+The plugin runs the `claudebar` CLI from your PATH, so install that too — from the AUR (`yay -S claudebar`) or with `make install PREFIX=~/.local`.
+
+For development, link the working copy instead of cloning a second one:
 
 ```bash
 make install-omarchy
