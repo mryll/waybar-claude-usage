@@ -745,6 +745,7 @@ Panel {
 
             iconComponent: Component {
               Text {
+                textFormat: Text.PlainText
                 text: "\ue861"
                 color: root.brandColor
                 font.family: "Font Awesome 7 Brands"
