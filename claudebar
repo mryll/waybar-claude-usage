@@ -304,6 +304,41 @@ REFRESH_BUFFER=300 # refresh 5 min before expiry
 CACHE_DIR="$HOME/.cache/claudebar"
 CACHE_TTL=60 # seconds
 
+# Byte caps for everything this script did not write itself. The plugin runs
+# INSIDE the long-lived omarchy-shell process, so a read that never returns
+# does not degrade the widget — it takes the shell with it.
+MAX_CONFIG_BYTES=$((256 * 1024))    # theme / config: hand-written, small
+MAX_STATE_BYTES=$((64 * 1024))      # credentials, caches, markers: machine-written, smaller
+MAX_RESP_BYTES=$((2 * 1024 * 1024)) # HTTP bodies; mirrors curl's --max-filesize
+
+# A file this script does not own can be replaced by a FIFO — reading one
+# blocks for ever — or by something enormous, which a shell variable would
+# hold in full. Every foreign read goes through here: regular file only, and
+# never more than MAXBYTES.
+read_bounded() { # read_bounded PATH MAXBYTES
+    [[ -f "$1" ]] || return 1 # -f is false for FIFO, socket, directory and device
+    LC_ALL=C head -c "$2" -- "$1"
+}
+
+# True when a captured HTTP body is over MAX_RESP_BYTES. `local LC_ALL=C` is
+# the load-bearing part: under a UTF-8 locale ${#var} counts CHARACTERS, so a
+# multibyte flood would measure up to 4x short. bash restores the locale on
+# return, so nothing else in the script sees C collation.
+resp_too_big() { # resp_too_big BODY
+    local LC_ALL=C
+    ((${#1} > MAX_RESP_BYTES))
+}
+
+# The write side hangs too: open(2) for writing on a FIFO waits for a reader
+# that never comes, so a FIFO planted at a predictable state path is the same
+# shell-wide stall as one planted at a read path. Verified with mkfifo: `>` and
+# `exec 9>` both block for ever, while `touch` does not (coreutils opens with
+# O_NONBLOCK) and `mv` is rename(2), so the mktemp+mv cache writes are safe.
+# True when the path is safe to open for writing: absent, or a regular file.
+writable_path() { # writable_path PATH
+    [[ ! -e "$1" || -f "$1" ]]
+}
+
 # Transient (no-HTTP-response) failures retry on a deadline budget, not a fixed
 # attempt count. Boot-like starts (no cache, or cache older than
 # NET_BOOT_CACHE_AGE) poll up to NET_LONG_BUDGET seconds: at the first Waybar
@@ -418,7 +453,7 @@ load_theme_colors() {
                     color3)     color3="$val" ;;
                 esac
             fi
-        done < "$theme_file"
+        done < <(read_bounded "$theme_file" "$MAX_CONFIG_BYTES")
         # Map theme colors to widget colors. Named keys win; the color1/2/3
         # fallbacks keep older themes working exactly as before (where color1
         # stood in for both red and orange).
@@ -471,14 +506,14 @@ load_pywal_colors() {
     # palette happens to omit. A parse failure yields no lines, and the count
     # check below then leaves every field at its default.
     local _pw=()
-    readarray -t _pw < <(jq -r '
+    readarray -t _pw < <(read_bounded "$wal_file" "$MAX_STATE_BYTES" 2>/dev/null | jq -r '
         ((.special.foreground | strings) // ""),
         ((.special.background | strings) // ""),
         ((.special.cursor     | strings) // ""),
         ((.colors.color1      | strings) // ""),
         ((.colors.color2      | strings) // ""),
         ((.colors.color3      | strings) // ""),
-        ((.colors.color4      | strings) // "")' "$wal_file" 2>/dev/null) || true
+        ((.colors.color4      | strings) // "")' 2>/dev/null) || true
     (( ${#_pw[@]} == 7 )) || return 0
 
     local pw_fg="${_pw[0]}" pw_bg="${_pw[1]}" pw_cursor="${_pw[2]}"
@@ -867,7 +902,9 @@ done
 [[ -f "$CREDS" ]] || die "No credentials.\nRun <b>claude</b> to log in."
 
 # --- Read credentials (initial — static fields only; mutable fields re-read under lock) ---
-creds=$(<"$CREDS")
+# Bounded: a rejected or truncated read leaves `creds` empty, and the jq check
+# below turns that into the same actionable message a corrupt file already got.
+creds=$(read_bounded "$CREDS" "$MAX_STATE_BYTES") || creds=""
 jq -e . <<< "$creds" &>/dev/null || die "Invalid credentials file.\nRun <b>claude</b> to log in."
 sub_type=$(jq -r 'try (.claudeAiOauth.subscriptionType // "unknown") catch "unknown"' <<< "$creds")
 rate_tier=$(jq -r 'try (.claudeAiOauth.rateLimitTier // "") catch ""' <<< "$creds")
@@ -882,7 +919,7 @@ _lockfile="$CACHE_DIR/.fetch.lock"
 
 _fetch_usage() {
     if [[ "$FORCE_REFRESH" != "true" ]] && [[ -f "$cache_file" ]] && (( cache_age < CACHE_TTL )); then
-        usage=$(<"$cache_file")
+        usage=$(read_bounded "$cache_file" "$MAX_STATE_BYTES") || usage=""
         return
     fi
 
@@ -892,7 +929,7 @@ _fetch_usage() {
             # stale flag, or show neutral "Loading…" if no usable cache exists.
             # No disk markers, no desktop notification.
             if [[ -f "$cache_file" ]] && (( cache_age <= WEEKLY_WINDOW )); then
-                usage=$(<"$cache_file")
+                usage=$(read_bounded "$cache_file" "$MAX_STATE_BYTES") || usage=""
                 transient_stale=true
                 return
             fi
@@ -900,7 +937,7 @@ _fetch_usage() {
         fi
         # Hard refresh failure (4xx/5xx, malformed) — preserve actionable signal.
         if [[ -f "$cache_file" ]] && (( cache_age <= WEEKLY_WINDOW )); then
-            usage=$(<"$cache_file")
+            usage=$(read_bounded "$cache_file" "$MAX_STATE_BYTES") || usage=""
             if [[ ! -f "$stale_marker" ]]; then
                 touch "$stale_marker"
                 command -v notify-send &>/dev/null && \
@@ -917,9 +954,26 @@ _fetch_usage() {
     # still settling at boot, brief blip) are retried until the shared deadline —
     # one missed dispatch otherwise means stale data for a full Waybar interval.
     while :; do
-        _resp_body=$(curl -s --max-time 10 -w '\n%{http_code}' "$API_URL" \
-            -H "Authorization: Bearer $access_token" \
-            -H "anthropic-beta: oauth-2025-04-20") || true
+        # Headers go in through a config file on stdin, never argv: an
+        # `-H "Authorization: Bearer …"` sits in /proc/<pid>/cmdline for the
+        # whole transfer, readable by every process of this user. The balance
+        # fetch below already did this; both now do.
+        _resp_body=$(printf 'header = "Authorization: Bearer %s"\nheader = "anthropic-beta: oauth-2025-04-20"\n' \
+            "$access_token" | curl --config - -s --max-time 10 \
+            --proto '=https' --max-filesize "$MAX_RESP_BYTES" \
+            -w '\n%{http_code}' "$API_URL") || true
+        # Belt for --max-filesize, and it is needed. Measured on curl 8.21.0: a
+        # Content-Length past the cap is refused before a byte is read, but a
+        # CHUNKED response is aborted only AFTER the cap is reached — and those
+        # 2 MiB are already in this variable, write-out suffix intact, so the
+        # split below would read a plausible 200 and hand the flood to jq.
+        # Drop the whole capture, and stop retrying: a server that floods once
+        # floods again.
+        if resp_too_big "$_resp_body"; then
+            _resp_body=""
+            _http_code="000"
+            break
+        fi
         _http_code="${_resp_body##*$'\n'}"
         _resp_body="${_resp_body%$'\n'"$_http_code"}"
         # Normalize bogus codes (e.g. raw body without curl write-out suffix) to 000.
@@ -941,17 +995,19 @@ _fetch_usage() {
         # on disk), or show neutral "Loading…".
         if [[ "$net_long" == "true" ]]; then touch "$net_wait_marker" 2>/dev/null || true; fi
         if [[ -f "$cache_file" ]] && (( cache_age <= WEEKLY_WINDOW )); then
-            usage=$(<"$cache_file")
+            usage=$(read_bounded "$cache_file" "$MAX_STATE_BYTES") || usage=""
             transient_stale=true
         else
             loading_network
         fi
     elif [[ -f "$cache_file" ]]; then
-        usage=$(<"$cache_file")
+        usage=$(read_bounded "$cache_file" "$MAX_STATE_BYTES") || usage=""
         touch "$stale_marker"
         if [[ "$_http_code" =~ ^[45][0-9]{2}$ ]]; then
             _err_msg=$(jq -r '.error.message // empty' <<< "$_resp_body" 2>/dev/null) || true
-            printf '%s\n%s' "$_http_code" "$_err_msg" > "$CACHE_DIR/.last_error"
+            if writable_path "$CACHE_DIR/.last_error"; then
+                printf '%s\n%s' "$_http_code" "$_err_msg" > "$CACHE_DIR/.last_error"
+            fi
         fi
     else
         die "API request failed.\nCheck your connection."
@@ -988,7 +1044,12 @@ _fetch_balance() {
     # Feed the bearer header through stdin so the token never appears in the
     # curl argv/process list.
     _credits_raw=$(printf 'header = "Authorization: Bearer %s"\nheader = "anthropic-beta: oauth-2025-04-20"\n' \
-        "$access_token" | curl --config - -s --max-time 10 -w '\n%{http_code}' "$_credits_url") || true
+        "$access_token" | curl --config - -s --max-time 10 \
+        --proto '=https' --max-filesize "$MAX_RESP_BYTES" \
+        -w '\n%{http_code}' "$_credits_url") || true
+    # Same belt as the usage fetch; there is no retry loop here to break out of,
+    # so an oversize capture just becomes "no answer" and the cache is left be.
+    if resp_too_big "$_credits_raw"; then _credits_raw=""; fi
     _credits_code="${_credits_raw##*$'\n'}"
     _credits_body="${_credits_raw%$'\n'"$_credits_code"}"
     [[ "$_credits_code" =~ ^[0-9]{3}$ ]] || _credits_code="000"
@@ -1011,6 +1072,11 @@ _fetch_balance() {
 }
 
 # --- Acquire lock for the state-changing window (refresh + usage fetch) ---
+# The type check comes FIRST and is not optional: `exec 9>` on a FIFO blocks
+# waiting for a reader that never arrives, and nothing downstream can cut that
+# short — no timeout wraps this open. A peer instance only ever leaves a
+# regular file here, so anything else is hostile and worth saying out loud.
+writable_path "$_lockfile" || die "Cache lock is not a regular file.\nRemove $_lockfile."
 # Multi-monitor: peer instances may rotate the refresh_token between our initial
 # read and our refresh attempt; locking and re-reading prevents a stale-token
 # refresh from writing a misleading .last_error while credentials are actually fine.
@@ -1049,7 +1115,7 @@ net_deadline=$(( SECONDS + net_budget ))
 
 # Re-read mutable credential fields under the lock.
 [[ -f "$CREDS" ]] || die "No credentials.\nRun <b>claude</b> to log in."
-creds=$(<"$CREDS")
+creds=$(read_bounded "$CREDS" "$MAX_STATE_BYTES") || creds=""
 jq -e . <<< "$creds" &>/dev/null || die "Invalid credentials file.\nRun <b>claude</b> to log in."
 access_token=$(jq -r 'try (.claudeAiOauth.accessToken // empty) catch empty' <<< "$creds")
 refresh_token=$(jq -r 'try (.claudeAiOauth.refreshToken // empty) catch empty' <<< "$creds")
@@ -1070,11 +1136,25 @@ if (( expires_s < now_s + REFRESH_BUFFER )); then
     refresh_body=$(jq -nc --arg ci "$CLIENT_ID" --arg rt "$refresh_token" \
                      '{grant_type:"refresh_token", client_id:$ci, refresh_token:$rt}')
     while :; do
-        refresh_raw=$(curl -s --max-time 25 -w '\n%{http_code}' -X POST "$TOKEN_URL" \
+        # The secret here is the POST BODY, not a header: `--data "$refresh_body"`
+        # puts the refresh token straight into argv. `--data @-` reads it from
+        # stdin instead. The body is compact single-line JSON, so the newline
+        # stripping that @- applies changes nothing. None of these headers is
+        # secret, so they stay on the command line.
+        refresh_raw=$(printf '%s' "$refresh_body" | curl -s --max-time 25 \
+            --proto '=https' --max-filesize "$MAX_RESP_BYTES" \
+            -w '\n%{http_code}' -X POST "$TOKEN_URL" \
             -H "Content-Type: application/json" \
             -H "anthropic-beta: oauth-2025-04-20" \
             -H "User-Agent: claude-cli/1.0" \
-            --data "$refresh_body") || true
+            --data @-) || true
+        # Belt for --max-filesize on a chunked body; see the usage fetch.
+        if resp_too_big "$refresh_raw"; then
+            refresh_raw=""
+            refresh_code="000"
+            resp=""
+            break
+        fi
         refresh_code="${refresh_raw##*$'\n'}"
         resp="${refresh_raw%$'\n'"$refresh_code"}"
         # Normalize bogus codes (e.g. raw body without curl write-out suffix) to 000.
@@ -1097,7 +1177,7 @@ if (( expires_s < now_s + REFRESH_BUFFER )); then
            --arg rt "${new_refresh:-$refresh_token}" \
            --argjson ea "$new_expires_at" \
            '.claudeAiOauth.accessToken=$at | .claudeAiOauth.refreshToken=$rt | .claudeAiOauth.expiresAt=$ea' \
-           "$CREDS" > "$tmp" && mv "$tmp" "$CREDS"
+           <<< "$creds" > "$tmp" && mv "$tmp" "$CREDS"
         rm -f "$CACHE_DIR/.last_error"
     else
         auth_ok=false
@@ -1281,12 +1361,18 @@ if [[ "$has_extra" == "true" ]]; then
         _credits_age=$(( $(date +%s) - $(date -r "$credits_file" +%s) ))
         (( _credits_age >= 0 && _credits_age < CACHE_TTL )) && _credits_fresh=true
     fi
-    if [[ "$_credits_fresh" == "true" ]] && jq -e -s '
+    # Read once, bounded, and validate the copy: two separate jq passes over the
+    # file would also read it twice, and a peer instance can swap it in between.
+    _credits_cached=""
+    if [[ "$_credits_fresh" == "true" ]]; then
+        _credits_cached=$(read_bounded "$credits_file" "$MAX_STATE_BYTES") || _credits_cached=""
+    fi
+    if [[ -n "$_credits_cached" ]] && jq -e -s '
         length == 1 and (.[0] | type) == "object"
         and ((.[0].amount | type) == "number")
         and (.[0].amount >= 0) and (.[0].amount <= 1e12)
-      ' "$credits_file" &>/dev/null; then
-        local_available=$(jq -r '.amount | floor' "$credits_file")
+      ' <<< "$_credits_cached" &>/dev/null; then
+        local_available=$(jq -r '.amount | floor' <<< "$_credits_cached")
         extra_balance_known=true
     elif [[ "$disabled_reason" == "out_of_credits" ]]; then
         local_available=0
@@ -1559,7 +1645,10 @@ if [[ "$JSON_MODE" == "true" ]]; then
     _json_last_error=null
     if [[ -f "$CACHE_DIR/.last_error" ]]; then
         _le_code="" _le_msg=""
-        { read -r _le_code || true; read -r _le_msg || true; } < "$CACHE_DIR/.last_error" 2>/dev/null || true
+        # Bounded, and through a process substitution: a FIFO here would park
+        # `read` for ever, and the redirect form gives it the file directly.
+        { read -r _le_code || true; read -r _le_msg || true; } \
+            < <(read_bounded "$CACHE_DIR/.last_error" "$MAX_STATE_BYTES" 2>/dev/null) || true
         if [[ -n "$_le_code" && "$_le_code" =~ ^[0-9]+$ && "$_le_code" != "000" ]]; then
             _json_last_error=$(jq -nc --argjson c "$_le_code" --arg m "$_le_msg" \
                 '{http_status:$c, message:(if $m == "" then ("HTTP " + ($c|tostring)) else $m end)}')
@@ -1873,7 +1962,10 @@ else
     # API error info (if stale)
     if [[ -f "$CACHE_DIR/.last_error" ]]; then
         _le_code="" _le_msg=""
-        { read -r _le_code || true; read -r _le_msg || true; } < "$CACHE_DIR/.last_error" 2>/dev/null || true
+        # Bounded, and through a process substitution: a FIFO here would park
+        # `read` for ever, and the redirect form gives it the file directly.
+        { read -r _le_code || true; read -r _le_msg || true; } \
+            < <(read_bounded "$CACHE_DIR/.last_error" "$MAX_STATE_BYTES" 2>/dev/null) || true
         if [[ -n "$_le_code" ]] && [[ "$_le_code" =~ ^[0-9]+$ ]] && [[ "$_le_code" != "000" ]]; then
             _le_msg=$(pango_escape "$_le_msg")
             if (( _le_code >= 500 )); then

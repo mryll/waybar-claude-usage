@@ -139,15 +139,20 @@ Panel {
 
   function finalizeRun() {
     var text = capturedText.trim()
-    if (text === "")
-      // The install hint lives HERE and not in the core, which is where every
-      // other message of this family lives. The one message the core cannot
-      // emit is the one about its own absence.
-      setError("claudebar produced no output — not installed or not on PATH?\n\n"
-               + "Install it with:  yay -S claudebar\n"
-               + "Then open this panel again.")
-    else
+    if (text === "") {
+      // Only when nothing has explained the emptiness already. The collector's
+      // tripwire ALSO leaves capturedText empty, and there "not installed" is
+      // plainly false: the binary answered, it answered too much. The install
+      // hint lives HERE and not in the core, which is where every other message
+      // of this family lives. The one message the core cannot emit is the one
+      // about its own absence.
+      if (root.loadError === "")
+        setError("claudebar produced no output — not installed or not on PATH?\n\n"
+                 + "Install it with:  yay -S claudebar\n"
+                 + "Then open this panel again.")
+    } else {
       handle(text)
+    }
     if (pendingCmd) {
       var c = pendingCmd
       pendingCmd = null
@@ -636,8 +641,21 @@ Panel {
     }
     stdout: StdioCollector {
       waitForEnd: true
+      // A tripwire, not a limit. StdioCollector has already buffered the whole
+      // stream by the time this runs, so this cannot cap the peak memory — the
+      // real bound is in the CLI, which reads every file and every response
+      // under a byte cap of its own. What this does is refuse to RETAIN an
+      // answer that is far outside anything the CLI can legitimately produce,
+      // and say so, instead of parsing megabytes of unknown text into the
+      // long-lived shell process.
+      readonly property int maxBytes: 1024 * 1024
       onStreamFinished: {
-        root.capturedText = text
+        if (text.length > maxBytes) {
+          root.capturedText = ""
+          root.setError("claudebar returned more than " + (maxBytes / 1024) + " KiB — refusing it")
+        } else {
+          root.capturedText = text
+        }
         root.collectorDone = true
         root.maybeFinalize()
       }
