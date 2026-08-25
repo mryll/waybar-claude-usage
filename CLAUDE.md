@@ -30,16 +30,35 @@ the plugin marketplace checks them. All four have regression tests in
 `tests/test_hardening.sh`.
 
 - **Every read of a file this script does not own goes through `read_bounded`.**
-  Credentials, the usage/credits cache, `.last_error`, the Omarchy theme, the
-  pywal palette. The `[[ -f ]]` inside it is what rejects a FIFO (verified with
-  `mkfifo`: `-f` is false for FIFO, socket, directory and device); the byte cap
-  is what keeps a giant file out of a shell variable. 64 KiB for machine-written
-  state, 256 KiB for a theme.
-- **Every write on a predictable path goes through `writable_path` first.**
-  `open(2)` for writing on a FIFO blocks for a reader that never comes, so the
-  write side stalls exactly like the read side. `exec 9>` on the fetch lock was
-  the real one. `touch` is safe (coreutils uses `O_NONBLOCK`) and `mv` is
-  `rename(2)`, so the mktemp+mv cache writes need no guard.
+  Credentials, `~/.claude.json`, the usage/credits cache, `.last_error`, the
+  Omarchy theme, the pywal palette. The `[[ -f ]]` inside it rejects a FIFO
+  cheaply (verified with `mkfifo`: `-f` is false for FIFO, socket, directory
+  and device) but it is a check on a PATH, and the open that follows is a
+  second syscall — swap the file in between and the open hangs anyway. That is
+  why the reader is `dd iflag=nonblock`, the one coreutils reader that passes
+  `O_NONBLOCK` to `open(2)`: `head -c` on a FIFO times out, `dd` returns at
+  once, and on a regular file the flag changes nothing. The byte cap is the
+  other half — 64 KiB for machine-written state, 256 KiB for a theme, 4 MiB for
+  `~/.claude.json` (the CLI's own file, 61 KiB today and growing with history).
+  **A file handed to `jq` is read this way and piped in on stdin; `jq` never
+  opens a foreign path itself**, because nothing bounds it if the file grows.
+  Where a cap can truncate, the caller must degrade to a branch that already
+  exists — the oversize `~/.claude.json` reports no organization UUID, exactly
+  as a missing one does.
+- **Every write on a predictable path is guarded, and on the fd where there is
+  one.** `open(2)` for writing on a FIFO blocks for a reader that never comes,
+  so the write side stalls exactly like the read side. The fetch lock opens
+  `exec 9<>` — read-write, which `fifo(7)` guarantees never blocks — and then
+  checks `/dev/fd/9`, so no decision rests on a stat that can go stale.
+  `writable_path` (a path check, therefore racy) is left only on the
+  `.last_error` write, where a `>` redirection offers no descriptor to check.
+  `touch` is safe (coreutils uses `O_NONBLOCK`) and `mv` is `rename(2)`, so the
+  mktemp+mv cache writes need no guard.
+- **Every `curl` starts with `-q`, as the FIRST argument.** Otherwise curl
+  reads `~/.curlrc` before our `--config -`, and whoever can write that file —
+  the premise of this whole section — adds `url =`, `insecure` or another
+  `config` to every transfer. Measured on curl 8.21.0: a bogus option there is
+  diagnosed without `-q` and ignored with it.
 - **`curl_auth_cfg` is the ONLY place a curl config file is built, and it
   rejects.** The config parser is line oriented: a newline inside a value ends
   the line and the rest parses as fresh options. A token carrying
@@ -49,12 +68,20 @@ the plugin marketplace checks them. All four have regression tests in
   https URL. Escaping is the wrong answer: a bearer with a line break is a
   tampered file, so `token_is_safe` rejects it at BOTH sources, the credentials
   file and the refresh response.
-- **The panel refuses to retain more than 1 MiB of CLI output.** A tripwire in
-  the `StdioCollector`, not a limit — the stream is already buffered by then.
+- **The panel refuses to retain more than 1 Mi CHARACTERS of CLI output.** A
+  tripwire in the `StdioCollector`, not a limit — the stream is already
+  buffered by then — and it counts UTF-16 units, because QML's `String.length`
+  has no byte view. The property is `maxChars` and the message says characters:
+  a megabyte of units is up to three megabytes of UTF-8, so a name or a message
+  that says "KiB" states a bound this code never measures.
   Its message must survive `finalizeRun`, which is why the not-installed hint
   is gated on `loadError === ""`: the tripwire also leaves `capturedText` empty,
   and there "not installed" is plainly false.
 
-Secrets never go in argv. The bearer token and the refresh token both reach
-curl through stdin (`--config -` and `--data @-`), because `/proc/<pid>/cmdline`
-is readable by every process of this user for the length of the transfer.
+Secrets never go in argv — **and that means every process, not just curl**.
+The bearer token and the refresh token reach curl through stdin (`--config -`
+and `--data @-`), and they reach `jq` through the ENVIRONMENT (`rt="$tok" jq
+'$ENV.rt'`, never `--arg rt "$tok"`): `/proc/<pid>/cmdline` is readable by every
+process of this user for the length of the call, while `/proc/<pid>/environ` is
+readable only by its owner. `tests/test_hardening.sh` spies on the argv of both
+programs across a full refresh cycle.

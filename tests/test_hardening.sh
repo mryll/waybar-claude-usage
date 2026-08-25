@@ -70,6 +70,7 @@ _h_fifo_lasterr() { mkfifo "$1/.cache/claudebar/.last_error"; }
 _h_fifo_credits() { mkfifo "$1/.cache/claudebar/credits.json"; }
 _h_fifo_theme()   { mkfifo "$1/.local/state/omarchy/current/theme/colors.toml"; }
 _h_fifo_pywal()   { mkfifo "$1/.cache/wal/colors.json"; }
+_h_fifo_claude()  { rm -f "$1/.claude.json"; mkfifo "$1/.claude.json"; }
 _h_big_cache()    { _big "$1/.cache/claudebar/usage.json"; }
 _h_big_creds()    { _big "$1/.claude/.credentials.json"; }
 _h_big_theme()    { _big "$1/.local/state/omarchy/current/theme/colors.toml"; }
@@ -81,6 +82,7 @@ _run_hostile "FIFO .last_error"    _h_fifo_lasterr
 _run_hostile "FIFO credits cache"  _h_fifo_credits
 _run_hostile "FIFO omarchy theme"  _h_fifo_theme
 _run_hostile "FIFO pywal cache"    _h_fifo_pywal
+_run_hostile "FIFO ~/.claude.json" _h_fifo_claude
 _run_hostile "3MB usage cache"     _h_big_cache
 _run_hostile "3MB credentials"     _h_big_creds
 _run_hostile "3MB omarchy theme"   _h_big_theme
@@ -145,4 +147,239 @@ header = "X: y'
 _run_injection "token with CR"        $'abc\rurl = https://evil.example'
 _run_injection "token with a quote"   'abc"def'
 _run_injection "token with backslash" 'abc\def'
+
+# --- the reader must not block when the path becomes a FIFO AFTER the check ---
+# `[[ -f ]]` answers about a PATH, and the open that follows is a separate
+# syscall: whoever owns the directory swaps the regular file for a FIFO in
+# between and the open waits for a writer that never comes. The stub below
+# makes that race deterministic — it performs the swap and then execs the real
+# tool — and read_bounded is taken verbatim out of the shipped script, so what
+# runs here is the shipped code. `dd iflag=nonblock` returns at once; `head -c`
+# hangs, which is exit 124.
+_test_read_bounded_race() {
+    local dir target real fn rc out
+    dir="$(mktemp -d)" || { echo "HARNESS SETUP FAILED" >&2; exit 1; }
+    target="$dir/state.json"
+    mkdir -p "$dir/bin" || { echo "HARNESS SETUP FAILED" >&2; exit 1; }
+    fn="$dir/read_bounded.sh"
+    sed -n '/^read_bounded() {/,/^}/p' "$SCRIPT" > "$fn"
+
+    # Positive control FIRST: without it a botched extraction would leave
+    # `read_bounded` undefined, the run would exit 127, and the race assertion
+    # below — which only rejects 124 — would pass while proving nothing.
+    printf 'the-quick-brown-fox' > "$target"
+    out=$(timeout 5 bash -c 'source "$1"; read_bounded "$2" 65536' _ "$fn" "$target" 2>/dev/null)
+    [[ "$out" == "the-quick-brown-fox" ]] \
+        && _ok "read_bounded race harness: the extracted function really runs" \
+        || _no "read_bounded race harness: the extracted function really runs" "got: $out"
+    out=$(head -c 200000 /dev/zero | tr '\0' 'A' > "$target"; \
+          timeout 5 bash -c 'source "$1"; read_bounded "$2" 65536' _ "$fn" "$target" 2>/dev/null | wc -c)
+    [[ "$out" == "65536" ]] \
+        && _ok "read_bounded: still truncates at the cap" \
+        || _no "read_bounded: still truncates at the cap" "read $out bytes"
+
+    # Every reader it could plausibly use gets a stub, so the assertion is about
+    # the OPEN being non-blocking rather than about which tool was picked.
+    local tool
+    for tool in dd head cat; do
+        real="$(command -v "$tool")" || { echo "HARNESS SETUP FAILED" >&2; exit 1; }
+        { printf '#!/usr/bin/env bash\n'
+          printf '# the swap the -f check cannot see\n'
+          printf 'rm -f %q && mkfifo %q\n' "$target" "$target"
+          printf 'exec %q "$@"\n' "$real"
+        } > "$dir/bin/$tool" && chmod +x "$dir/bin/$tool" \
+            || { echo "HARNESS SETUP FAILED" >&2; exit 1; }
+    done
+    rm -f "$target"; printf 'still-a-regular-file' > "$target"
+    PATH="$dir/bin:$PATH" timeout 5 bash -c 'source "$1"; read_bounded "$2" 65536' \
+        _ "$fn" "$target" >/dev/null 2>&1
+    rc=$?
+    [[ "$rc" -ne 124 ]] \
+        && _ok "read_bounded: returns when the file turns into a FIFO after the check" \
+        || _no "read_bounded: returns when the file turns into a FIFO after the check" "timed out — blocked"
+    rm -rf "$dir"
+}
+_test_read_bounded_race
+
+# --- curl reads ~/.curlrc before our own config unless -q is FIRST ---
+# Two halves. This one is the mechanism, run against the real curl with no
+# server: curl parses its config before it dials, so an unknown option in
+# ~/.curlrc is diagnosed on a connection that is refused instantly. Without -q
+# the file is read; with it, it is not. The other half, below, is that every
+# curl the script builds actually carries the flag.
+_test_curlrc_mechanism() {
+    local real dir without with
+    real="$(command -v curl)" || { _no "curl -q mechanism" "no curl on PATH"; return; }
+    dir="$(mktemp -d)" || { echo "HARNESS SETUP FAILED" >&2; exit 1; }
+    printf 'this-option-does-not-exist\n' > "$dir/.curlrc"
+    # Port 9 on loopback: refused at once, so this never leaves the machine.
+    # XDG_* pinned like every other fake-HOME run in this suite: curl does not
+    # read them, but the hygiene guard in test_json.sh checks the shape of the
+    # invocation, not what the program does with it. An exception here would
+    # quietly weaken that guard for everyone.
+    without=$(HOME="$dir" XDG_STATE_HOME="$dir/.local/state" \
+                XDG_CACHE_HOME="$dir/.cache" XDG_CONFIG_HOME="$dir/.config" \
+                timeout 10 "$real" -s --max-time 2 --proto '=https' \
+                https://127.0.0.1:9/x 2>&1)
+    with=$(HOME="$dir" XDG_STATE_HOME="$dir/.local/state" \
+                XDG_CACHE_HOME="$dir/.cache" XDG_CONFIG_HOME="$dir/.config" \
+                timeout 10 "$real" -q -s --max-time 2 --proto '=https' \
+                https://127.0.0.1:9/x 2>&1)
+    grep -q 'this-option-does-not-exist' <<< "$without" \
+        && _ok "curl -q mechanism: without -q the ~/.curlrc IS read" \
+        || _no "curl -q mechanism: without -q the ~/.curlrc IS read" "curl said: $without"
+    grep -q 'this-option-does-not-exist' <<< "$with" \
+        && _no "curl -q mechanism: with -q the ~/.curlrc is NOT read" "curl said: $with" \
+        || _ok "curl -q mechanism: with -q the ~/.curlrc is NOT read"
+    rm -rf "$dir"
+}
+_test_curlrc_mechanism
+
+# --- argv spy: what every curl and every jq of a full refresh cycle was given ---
+# /proc/<pid>/cmdline is world readable and /proc/<pid>/environ is not, so a
+# secret belongs in the environment or on stdin, never in an argument — and
+# that holds for jq exactly as much as for curl. The stubs record their own
+# argv; jq then execs the real jq so the script keeps working, and curl answers
+# with canned bodies so the whole cycle runs: refresh, usage fetch, credits.
+# CLAUDE_JSON is the file the organization UUID comes from; the caller varies
+# it to prove the bound on that read.
+_run_spy() { # _run_spy <label> <claude-json-setup-fn>
+    local label="$1" setup="$2" home real_jq
+    home="$(mktemp -d)" || { echo "HARNESS SETUP FAILED" >&2; exit 1; }
+    real_jq="$(command -v jq)" || { echo "HARNESS SETUP FAILED" >&2; exit 1; }
+    mkdir -p "$home/.claude" "$home/.cache/claudebar" "$home/bin" \
+        || { echo "HARNESS SETUP FAILED" >&2; exit 1; }
+    SPY_CURL_ARGV="$home/curl-argv.log"; SPY_CURL_STDIN="$home/curl-stdin.log"
+    SPY_JQ_ARGV="$home/jq-argv.log"
+    : > "$SPY_CURL_ARGV"; : > "$SPY_CURL_STDIN"; : > "$SPY_JQ_ARGV"
+    { printf '#!/usr/bin/env bash\n'
+      printf 'printf "%%s " "$@" >> %q; printf "\\n" >> %q\n' "$SPY_CURL_ARGV" "$SPY_CURL_ARGV"
+      printf 'cat >> %q 2>/dev/null\n' "$SPY_CURL_STDIN"
+      printf 'if [[ "$*" == *oauth/token* ]]; then\n'
+      printf '  printf "%%s\\n200" %q\n' "$SPY_REFRESH_RESP"
+      printf 'elif [[ "$*" == *prepaid/credits* ]]; then\n'
+      printf '  printf "%%s\\n200" %q\n' '{"amount":4200}'
+      printf 'else\n'
+      printf '  printf "%%s\\n200" %q\n' "$GOOD_EXTRA"
+      printf 'fi\n'
+    } > "$home/bin/curl" && chmod +x "$home/bin/curl" \
+        || { echo "HARNESS SETUP FAILED" >&2; exit 1; }
+    # Tab separated: a jq filter spans lines, and one record per invocation is
+    # what makes "no sentinel anywhere in argv" a readable assertion.
+    { printf '#!/usr/bin/env bash\n'
+      printf '{ printf "%%s\\t" "$@"; printf "\\n"; } >> %q\n' "$SPY_JQ_ARGV"
+      printf 'exec %q "$@"\n' "$real_jq"
+    } > "$home/bin/jq" && chmod +x "$home/bin/jq" \
+        || { echo "HARNESS SETUP FAILED" >&2; exit 1; }
+    # expiresAt in the past is what makes the refresh — and with it the
+    # credentials rewrite — actually run. Both sentinels pass token_is_safe.
+    printf '%s' "{\"claudeAiOauth\":{\"accessToken\":\"$SPY_ACCESS\",\"refreshToken\":\"$SPY_REFRESH\",\"expiresAt\":1000,\"subscriptionType\":\"max\"}}" \
+        > "$home/.claude/.credentials.json"
+    printf '%s' "$GOOD_EXTRA" > "$home/.cache/claudebar/usage.json"
+    "$setup" "$home"
+    OUT=$(run_pinned "$home" env CLAUDEBAR_TEST_NET_RETRY_DELAY=0 \
+            CLAUDEBAR_TEST_NET_QUICK_BUDGET=0 CLAUDEBAR_TEST_NET_LONG_BUDGET=0 \
+            timeout 30 "$SCRIPT" --refresh); RC=$?
+    [[ "$RC" -ne 124 ]] && _ok "$label: returns" || _no "$label: returns" "timed out — blocked"
+    assert_exit0 "$label: exit 0"
+    assert_json_valid "$label: valid JSON"
+    SPY_HOME="$home"
+}
+
+SPY_ACCESS='ACCESSTOKENSENTINEL-aaa'
+SPY_REFRESH='REFRESHTOKENSENTINEL-bbb'
+SPY_NEW_ACCESS='NEWACCESSSENTINEL-ccc'
+SPY_NEW_REFRESH='NEWREFRESHSENTINEL-ddd'
+SPY_REFRESH_RESP="{\"access_token\":\"$SPY_NEW_ACCESS\",\"refresh_token\":\"$SPY_NEW_REFRESH\",\"expires_in\":3600}"
+# extra_usage is what makes the credits request happen at all.
+GOOD_EXTRA='{"five_hour":{"utilization":40,"resets_at":"2030-01-01T00:00:00+00:00"},"seven_day":{"utilization":20,"resets_at":"2030-01-01T00:00:00+00:00"},"extra_usage":{"is_enabled":true,"monthly_limit":10000,"used_credits":100}}'
+
+_cj_small() { printf '%s' '{"oauthAccount":{"organizationUuid":"org-test"}}' > "$1/.claude.json"; }
+_cj_huge()  { # 5 MiB of VALID JSON: jq would parse it happily, the cap is what stops it
+    { printf '{"oauthAccount":{"organizationUuid":"org-test"},"pad":"'
+      head -c 5000000 /dev/zero | tr '\0' 'A'
+      printf '"}'
+    } > "$1/.claude.json"
+}
+
+_run_spy "argv spy" _cj_small
+_spy_argv=$(cat "$SPY_HOME/curl-argv.log"); _spy_stdin=$(cat "$SPY_HOME/curl-stdin.log")
+_spy_jq=$(cat "$SPY_HOME/jq-argv.log")
+
+# Positive controls first: a spy that captured nothing would pass every
+# "the secret is not there" assertion below without proving anything.
+(( $(grep -c . <<< "$_spy_argv") >= 3 )) \
+    && _ok "argv spy: all three transfers were captured" \
+    || _no "argv spy: all three transfers were captured" "log was: $_spy_argv"
+grep -qF -- "$SPY_REFRESH" <<< "$_spy_stdin" \
+    && _ok "argv spy: the refresh token DID travel, on stdin" \
+    || _no "argv spy: the refresh token DID travel, on stdin" "stdin log: $_spy_stdin"
+grep -qF -- "Authorization: Bearer $SPY_NEW_ACCESS" <<< "$_spy_stdin" \
+    && _ok "argv spy: the refreshed bearer DID travel, on stdin" \
+    || _no "argv spy: the refreshed bearer DID travel, on stdin" "stdin log: $_spy_stdin"
+grep -qF 'claudeAiOauth.accessToken=$ENV.at' <<< "$_spy_jq" \
+    && _ok "argv spy: the credentials rewrite really ran" \
+    || _no "argv spy: the credentials rewrite really ran" "jq log: $_spy_jq"
+grep -qF 'grant_type' <<< "$_spy_jq" \
+    && _ok "argv spy: the refresh body was really built" \
+    || _no "argv spy: the refresh body was really built" "jq log: $_spy_jq"
+
+# A: -q, and FIRST — after any other option curl has already read ~/.curlrc.
+_bad_q=$(grep -vE '^-q ' <<< "$_spy_argv" | grep . || true)
+[[ -z "$_bad_q" ]] \
+    && _ok "curl: -q is the first argument of every transfer" \
+    || _no "curl: -q is the first argument of every transfer" "these did not start with -q: $_bad_q"
+
+# Neither secret may appear in ANY command line, curl's or jq's.
+for _sentinel in "$SPY_ACCESS" "$SPY_REFRESH" "$SPY_NEW_ACCESS" "$SPY_NEW_REFRESH"; do
+    grep -qF -- "$_sentinel" <<< "$_spy_argv" \
+        && _no "curl argv: no $_sentinel" "argv log: $_spy_argv" \
+        || _ok "curl argv: no $_sentinel"
+    grep -qF -- "$_sentinel" <<< "$_spy_jq" \
+        && _no "jq argv: no $_sentinel" "jq log: $_spy_jq" \
+        || _ok "jq argv: no $_sentinel"
+done
+# The credits request is the positive control for the .claude.json case below:
+# with a readable file, the organization UUID is found and the request happens.
+grep -qF '/prepaid/credits' <<< "$_spy_argv" \
+    && _ok "small .claude.json: the credits request happens" \
+    || _no "small .claude.json: the credits request happens" "argv log: $_spy_argv"
+rm -rf "$SPY_HOME"
+
+# --- an oversize ~/.claude.json degrades to "no credits data", it does not hang ---
+# jq used to open this file itself, with nothing bounding it. The file is the
+# CLI's own state and it grows; a big enough one is a jq that may never finish,
+# inside the shell process. Note the payload here is VALID JSON — jq would read
+# all 5 MiB of it without complaint, so passing this proves the cap, not luck.
+_run_spy "5MB .claude.json" _cj_huge
+_spy_argv=$(cat "$SPY_HOME/curl-argv.log")
+grep -qF '/prepaid/credits' <<< "$_spy_argv" \
+    && _no "5MB .claude.json: no credits request" "argv log: $_spy_argv" \
+    || _ok "5MB .claude.json: no credits request"
+rm -rf "$SPY_HOME"
+
+# --- the fetch lock is refused on the DESCRIPTOR, not on a stat of the path ---
+# The pre-open `writable_path` check was a race of its own; the open is now
+# read-write, which fifo(7) guarantees never blocks, and the type check runs on
+# fd 9 afterwards. This asserts the message that check produces — the run
+# returning and staying valid JSON is already covered by the FIFO lock case
+# above, and both come from the same code path only if that check exists.
+_test_lock_fd_check() {
+    local home
+    home="$(mktemp -d)" || { echo "HARNESS SETUP FAILED" >&2; exit 1; }
+    mkdir -p "$home/.claude" "$home/.cache/claudebar" "$home/bin" \
+        || { echo "HARNESS SETUP FAILED" >&2; exit 1; }
+    printf '#!/usr/bin/env bash\nexit 1\n' > "$home/bin/curl" && chmod +x "$home/bin/curl" \
+        || { echo "HARNESS SETUP FAILED" >&2; exit 1; }
+    printf '%s' "$VALID_CREDS" > "$home/.claude/.credentials.json"
+    printf '%s' "$GOOD" > "$home/.cache/claudebar/usage.json"
+    mkfifo "$home/.cache/claudebar/.fetch.lock"
+    OUT=$(run_pinned "$home" timeout 20 "$SCRIPT"); RC=$?
+    [[ "$RC" -ne 124 ]] && _ok "FIFO lock: returns" || _no "FIFO lock: returns" "timed out — blocked"
+    assert_exit0 "FIFO lock: exit 0"
+    assert_tip_has "FIFO lock: says the lock is not a regular file" "not a regular file"
+    rm -rf "$home"
+}
+_test_lock_fd_check
+
 finish

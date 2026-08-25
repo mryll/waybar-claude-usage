@@ -310,14 +310,32 @@ CACHE_TTL=60 # seconds
 MAX_CONFIG_BYTES=$((256 * 1024))    # theme / config: hand-written, small
 MAX_STATE_BYTES=$((64 * 1024))      # credentials, caches, markers: machine-written, smaller
 MAX_RESP_BYTES=$((2 * 1024 * 1024)) # HTTP bodies; mirrors curl's --max-filesize
+# ~/.claude.json is the CLI's own state file and grows with history — 61 KiB on
+# this machine — so it gets a cap of its own, two orders of magnitude above
+# what it holds today. Any cap on it is a trade: a truncated read makes jq fail
+# and the organization UUID come back empty. That is not a silent regression
+# here, because it lands on the branch that already exists for a file that is
+# missing — no credits data — and it only triggers past 4 MiB of it.
+MAX_CLAUDE_JSON_BYTES=$((4 * 1024 * 1024))
 
 # A file this script does not own can be replaced by a FIFO — reading one
 # blocks for ever — or by something enormous, which a shell variable would
 # hold in full. Every foreign read goes through here: regular file only, and
 # never more than MAXBYTES.
+#
+# A FIFO blocks in open(2), not in read(2), so testing the PATH and then
+# opening it is a race: between the two, whoever owns the directory swaps the
+# regular file for a FIFO and the open hangs anyway. `head` has no way to ask
+# for a non-blocking open, so the test was the whole defence and the race was
+# real. `dd iflag=nonblock` is the one coreutils reader that passes O_NONBLOCK
+# to open(2), which on a FIFO returns at once instead of waiting for a writer;
+# on a regular file the flag changes nothing. `[[ -f ]]` stays because it
+# rejects the common case cheaply and reports failure to the caller; the flag
+# is what closes the window behind it. `status=none` silences the transfer
+# counts only — a read error still prints, hence the redirect.
 read_bounded() { # read_bounded PATH MAXBYTES
     [[ -f "$1" ]] || return 1 # -f is false for FIFO, socket, directory and device
-    LC_ALL=C head -c "$2" -- "$1"
+    LC_ALL=C dd if="$1" iflag=nonblock bs="$2" count=1 status=none 2>/dev/null
 }
 
 # True when a captured HTTP body reached MAX_RESP_BYTES. `>=`, not `>`: curl
@@ -329,6 +347,15 @@ read_bounded() { # read_bounded PATH MAXBYTES
 resp_too_big() { # resp_too_big BODY
     local LC_ALL=C
     ((${#1} >= MAX_RESP_BYTES))
+}
+
+# Same measurement for a bounded FILE read: read_bounded returns exactly
+# MAXBYTES when it truncated, so "as long as the cap" means "there was more".
+# `local LC_ALL=C` for the same reason as above — under a UTF-8 locale ${#var}
+# counts characters, and bash restores the locale on return.
+read_was_truncated() { # read_was_truncated CONTENT MAXBYTES
+    local LC_ALL=C
+    ((${#1} >= $2))
 }
 
 # The bearer token is the one untrusted value that reaches curl's CONFIG
@@ -351,12 +378,28 @@ curl_auth_cfg() { # curl_auth_cfg TOKEN
     printf 'header = "Authorization: Bearer %s"\nheader = "anthropic-beta: oauth-2025-04-20"\n' "$1"
 }
 
+# Every curl below starts with `-q`, and it has to be the FIRST argument. curl
+# reads ~/.curlrc BEFORE it reads our `--config -`, so without `-q` the whole
+# escape above is optional: whoever can write that file — the same attacker,
+# since a tampered credentials file is the premise of this hardening — adds
+# `url =` to steal the bearer, `insecure` to strip TLS verification, or another
+# `config` line entirely, and does it to every transfer. `-q` after another
+# option is too late, the file is already read. Measured on curl 8.21.0: a
+# bogus option in ~/.curlrc is diagnosed without `-q` and ignored with it.
+
 # The write side hangs too: open(2) for writing on a FIFO waits for a reader
 # that never comes, so a FIFO planted at a predictable state path is the same
 # shell-wide stall as one planted at a read path. Verified with mkfifo: `>` and
 # `exec 9>` both block for ever, while `touch` does not (coreutils opens with
 # O_NONBLOCK) and `mv` is rename(2), so the mktemp+mv cache writes are safe.
 # True when the path is safe to open for writing: absent, or a regular file.
+#
+# This is a check on a PATH, so it is inherently a race — the file can change
+# between the answer and the open. The fetch lock does not use it any more, it
+# opens read-write (never blocks) and checks the descriptor instead. The one
+# caller left is the `.last_error` write, where a `>` redirection gives us no
+# descriptor to check first; the residual window there is one truncating write
+# of a two-line diagnostic, so the cheap check is worth more than the rewrite.
 writable_path() { # writable_path PATH
     [[ ! -e "$1" || -f "$1" ]]
 }
@@ -918,7 +961,7 @@ calc_pacing() {
 }
 
 # --- Pre-checks ---
-for cmd in curl jq date; do
+for cmd in curl jq date dd; do
     command -v "$cmd" &>/dev/null || die "Missing dependency: $cmd"
 done
 [[ -f "$CREDS" ]] || die "No credentials.\nRun <b>claude</b> to log in."
@@ -982,7 +1025,7 @@ _fetch_usage() {
         # fetch below already did this; both now do. A rejected token yields an
         # empty config, so curl asks unauthenticated and gets a 401 — it never
         # gets attacker-written option lines.
-        _resp_body=$(curl_auth_cfg "$access_token" | curl --config - -s --max-time 10 \
+        _resp_body=$(curl_auth_cfg "$access_token" | curl -q --config - -s --max-time 10 \
             --proto '=https' --max-filesize "$MAX_RESP_BYTES" \
             -w '\n%{http_code}' "$API_URL") || true
         # Belt for --max-filesize, and it is needed. Measured on curl 8.21.0: a
@@ -1046,9 +1089,19 @@ _fetch_balance() {
     [[ "$_has_credits" == "true" && "$auth_ok" == "true" ]] || return 0
 
     local _org_uuid="${CLAUDE_CODE_ORGANIZATION_UUID:-}"
-    if [[ -z "$_org_uuid" && -f "$HOME/.claude.json" ]]; then
+    if [[ -z "$_org_uuid" ]]; then
+        # This file belongs to the CLI, not to us, so it is read like every
+        # other foreign file: through read_bounded, and handed to jq on stdin
+        # instead of letting jq open the path. `[[ -f ]]` alone let a regular
+        # file of any size through, and jq on a file that keeps growing may
+        # never finish — inside the shell process that is the whole shell.
+        # An oversize read degrades to "no organization UUID", which is the
+        # branch this function already takes when the file is not there.
+        local _claude_json
+        _claude_json=$(read_bounded "$HOME/.claude.json" "$MAX_CLAUDE_JSON_BYTES") || _claude_json=""
+        if read_was_truncated "$_claude_json" "$MAX_CLAUDE_JSON_BYTES"; then _claude_json=""; fi
         _org_uuid=$(jq -r 'try ((.oauthAccount.organizationUuid | strings) // "") catch ""' \
-            "$HOME/.claude.json" 2>/dev/null) || _org_uuid=""
+            <<< "$_claude_json" 2>/dev/null) || _org_uuid=""
     fi
     # The identifier is inserted into a URL path, so reject anything beyond
     # Claude's UUID-like alphabet instead of letting account data shape curl.
@@ -1067,7 +1120,7 @@ _fetch_balance() {
     # Feed the bearer header through stdin so the token never appears in the
     # curl argv/process list, and through the guarded builder so it cannot
     # carry option lines of its own.
-    _credits_raw=$(curl_auth_cfg "$access_token" | curl --config - -s --max-time 10 \
+    _credits_raw=$(curl_auth_cfg "$access_token" | curl -q --config - -s --max-time 10 \
         --proto '=https' --max-filesize "$MAX_RESP_BYTES" \
         -w '\n%{http_code}' "$_credits_url") || true
     # Same belt as the usage fetch; there is no retry loop here to break out of,
@@ -1095,19 +1148,33 @@ _fetch_balance() {
 }
 
 # --- Acquire lock for the state-changing window (refresh + usage fetch) ---
-# The type check comes FIRST and is not optional: `exec 9>` on a FIFO blocks
-# waiting for a reader that never arrives, and nothing downstream can cut that
-# short — no timeout wraps this open. A peer instance only ever leaves a
-# regular file here, so anything else is hostile and worth saying out loud.
-writable_path "$_lockfile" || die "Cache lock is not a regular file.\nRemove $_lockfile."
 # Multi-monitor: peer instances may rotate the refresh_token between our initial
 # read and our refresh attempt; locking and re-reading prevents a stale-token
 # refresh from writing a misleading .last_error while credentials are actually fine.
+#
+# Nothing here decides on a stat of the PATH any more. `writable_path` in front
+# of `exec 9>` was a check-then-open race exactly like the read side had: the
+# file passes as regular, a FIFO takes its place, and `exec 9>` waits for a
+# reader that never comes with no timeout around it to cut it short. The open
+# is now `9<>`, read-write, which fifo(7) says never blocks on Linux — verified
+# with mkfifo: `9>` hangs, `9<>` returns at once — and the type check runs on
+# the DESCRIPTOR we ended up with, which is the object the rest of the run
+# uses. A swap can no longer hang us and can no longer pass unnoticed: whatever
+# it puts there, we open it without waiting and then refuse it.
+#
 # Braces, not a bare `exec ... 2>/dev/null`: a redirection on `exec` with no
 # command persists for the REST OF THE SCRIPT, so the bare form silenced every
 # later diagnostic (it hid a missing-function bug during development). The
 # group scopes the silencing to this one attempt while fd 9 still survives it.
-{ exec 9>"$_lockfile"; } 2>/dev/null || die "Cannot open cache lock.\nCheck ~/.cache permissions."
+{ exec 9<>"$_lockfile"; } 2>/dev/null || die "Cannot open cache lock.\nCheck ~/.cache permissions."
+# `-e` first: for a file a peer deleted after we opened it the fd stays valid
+# and there is nothing hostile about it, so only a descriptor we can stat and
+# that is NOT a regular file is refused. A peer instance only ever leaves a
+# regular file here, so anything else is hostile and worth saying out loud.
+if [[ -e /dev/fd/9 && ! -f /dev/fd/9 ]]; then
+    exec 9>&-
+    die "Cache lock is not a regular file.\nRemove $_lockfile."
+fi
 # Generous wait: a boot-like sibling may hold the lock for the long budget plus
 # in-flight curls (worst ≈ NET_LONG_BUDGET + 25s refresh + 10s fetch ≈ 57s);
 # rendering late beats dying with a visible "Cache lock timeout".
@@ -1161,15 +1228,21 @@ if (( expires_s < now_s + REFRESH_BUFFER )); then
     # Synchronous refresh — 25s timeout covers cold boot when DHCP is still settling.
     # Transient failures (no HTTP response) are retried until the shared deadline —
     # same policy as the usage fetch — so a cold-boot race doesn't cost a full interval.
-    refresh_body=$(jq -nc --arg ci "$CLIENT_ID" --arg rt "$refresh_token" \
-                     '{grant_type:"refresh_token", client_id:$ci, refresh_token:$rt}')
+    # The refresh token goes to jq through the ENVIRONMENT, not through
+    # `--arg`: an argument sits in jq's own /proc/<pid>/cmdline, which is world
+    # readable, and moving the secret out of curl's argv while leaving it in
+    # jq's argv moves nothing. /proc/<pid>/environ is readable by the owner of
+    # the process only. $CLIENT_ID stays an argument — it is the public Claude
+    # CLI client ID, not a secret.
+    refresh_body=$(rt="$refresh_token" jq -nc --arg ci "$CLIENT_ID" \
+                     '{grant_type:"refresh_token", client_id:$ci, refresh_token:$ENV.rt}')
     while :; do
         # The secret here is the POST BODY, not a header: `--data "$refresh_body"`
         # puts the refresh token straight into argv. `--data @-` reads it from
         # stdin instead. The body is compact single-line JSON, so the newline
         # stripping that @- applies changes nothing. None of these headers is
         # secret, so they stay on the command line.
-        refresh_raw=$(printf '%s' "$refresh_body" | curl -s --max-time 25 \
+        refresh_raw=$(printf '%s' "$refresh_body" | curl -q -s --max-time 25 \
             --proto '=https' --max-filesize "$MAX_RESP_BYTES" \
             -w '\n%{http_code}' -X POST "$TOKEN_URL" \
             -H "Content-Type: application/json" \
@@ -1206,10 +1279,13 @@ if (( expires_s < now_s + REFRESH_BUFFER )); then
         new_expires_at=$(( $(date +%s) * 1000 + expires_in * 1000 ))
 
         tmp=$(mktemp)
-        jq --arg at "$access_token" \
-           --arg rt "${new_refresh:-$refresh_token}" \
-           --argjson ea "$new_expires_at" \
-           '.claudeAiOauth.accessToken=$at | .claudeAiOauth.refreshToken=$rt | .claudeAiOauth.expiresAt=$ea' \
+        # Both tokens reach jq through the environment for the same reason as
+        # the request body above: `--arg at "$access_token"` publishes the
+        # fresh bearer in jq's command line to every process of this user. The
+        # expiry is a number and public, so it stays an argument.
+        at="$access_token" rt="${new_refresh:-$refresh_token}" \
+        jq --argjson ea "$new_expires_at" \
+           '.claudeAiOauth.accessToken=$ENV.at | .claudeAiOauth.refreshToken=$ENV.rt | .claudeAiOauth.expiresAt=$ea' \
            <<< "$creds" > "$tmp" && mv "$tmp" "$CREDS" || rm -f "$tmp"
         rm -f "$CACHE_DIR/.last_error"
     else
