@@ -140,7 +140,12 @@ Panel {
   function finalizeRun() {
     var text = capturedText.trim()
     if (text === "")
-      setError("claudebar produced no output — not installed or not on PATH?")
+      // The install hint lives HERE and not in the core, which is where every
+      // other message of this family lives. The one message the core cannot
+      // emit is the one about its own absence.
+      setError("claudebar produced no output — not installed or not on PATH?\n\n"
+               + "Install it with:  yay -S claudebar\n"
+               + "Then open this panel again.")
     else
       handle(text)
     if (pendingCmd) {
@@ -610,6 +615,18 @@ Panel {
   Process {
     id: statusProc
     command: ["claudebar", "--json"]
+    // A command that does not exist gives NEITHER `started` NOR `exited` —
+    // Quickshell just drops `running` back to false. That is the only signal a
+    // failed start emits, and without this handler the panel sits on its
+    // loading text for ever: maybeFinalize() waits on processDone, which
+    // nothing would ever set. This IS the first run of anyone who installed
+    // the plugin from the marketplace and does not have the CLI yet.
+    onRunningChanged: {
+      if (running) return
+      root.processDone = true
+      exitFallback.restart()
+      root.maybeFinalize()
+    }
     onExited: function(code) {
       root.exitCode = code
       root.processDone = true
