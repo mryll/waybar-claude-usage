@@ -20,3 +20,41 @@
 - OAuth client ID (`9d1c250a-...`) is the public Claude CLI client ID, not a secret
 - Cache writes use atomic `mktemp` + `mv` to avoid partial reads from concurrent Waybar instances
 - `flock` serializes API calls across multi-monitor Waybar instances sharing the same cache
+
+## Hardening rules — the widget runs INSIDE omarchy-shell
+
+The plugin is not a short-lived Waybar exec here: it lives in the long-running
+shell process. A read that never returns does not degrade the widget, it takes
+the whole shell down. These four rules exist for that, and a security review of
+the plugin marketplace checks them. All four have regression tests in
+`tests/test_hardening.sh`.
+
+- **Every read of a file this script does not own goes through `read_bounded`.**
+  Credentials, the usage/credits cache, `.last_error`, the Omarchy theme, the
+  pywal palette. The `[[ -f ]]` inside it is what rejects a FIFO (verified with
+  `mkfifo`: `-f` is false for FIFO, socket, directory and device); the byte cap
+  is what keeps a giant file out of a shell variable. 64 KiB for machine-written
+  state, 256 KiB for a theme.
+- **Every write on a predictable path goes through `writable_path` first.**
+  `open(2)` for writing on a FIFO blocks for a reader that never comes, so the
+  write side stalls exactly like the read side. `exec 9>` on the fetch lock was
+  the real one. `touch` is safe (coreutils uses `O_NONBLOCK`) and `mv` is
+  `rename(2)`, so the mktemp+mv cache writes need no guard.
+- **`curl_auth_cfg` is the ONLY place a curl config file is built, and it
+  rejects.** The config parser is line oriented: a newline inside a value ends
+  the line and the rest parses as fresh options. A token carrying
+  `url = https://evil` plus `insecure` gets the attacker a second transfer with
+  the credential attached — proven against a local TLS listener — and
+  `--proto '=https'` does not stop it, because the attacker simply picks an
+  https URL. Escaping is the wrong answer: a bearer with a line break is a
+  tampered file, so `token_is_safe` rejects it at BOTH sources, the credentials
+  file and the refresh response.
+- **The panel refuses to retain more than 1 MiB of CLI output.** A tripwire in
+  the `StdioCollector`, not a limit — the stream is already buffered by then.
+  Its message must survive `finalizeRun`, which is why the not-installed hint
+  is gated on `loadError === ""`: the tripwire also leaves `capturedText` empty,
+  and there "not installed" is plainly false.
+
+Secrets never go in argv. The bearer token and the refresh token both reach
+curl through stdin (`--config -` and `--data @-`), because `/proc/<pid>/cmdline`
+is readable by every process of this user for the length of the transfer.

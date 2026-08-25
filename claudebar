@@ -320,13 +320,35 @@ read_bounded() { # read_bounded PATH MAXBYTES
     LC_ALL=C head -c "$2" -- "$1"
 }
 
-# True when a captured HTTP body is over MAX_RESP_BYTES. `local LC_ALL=C` is
-# the load-bearing part: under a UTF-8 locale ${#var} counts CHARACTERS, so a
+# True when a captured HTTP body reached MAX_RESP_BYTES. `>=`, not `>`: curl
+# aborts a chunked response at EXACTLY the cap, so the one case this exists for
+# lands on the boundary and `>` would never fire. `local LC_ALL=C` is the other
+# load-bearing part: under a UTF-8 locale ${#var} counts CHARACTERS, so a
 # multibyte flood would measure up to 4x short. bash restores the locale on
 # return, so nothing else in the script sees C collation.
 resp_too_big() { # resp_too_big BODY
     local LC_ALL=C
-    ((${#1} > MAX_RESP_BYTES))
+    ((${#1} >= MAX_RESP_BYTES))
+}
+
+# The bearer token is the one untrusted value that reaches curl's CONFIG
+# parser, and that parser is line oriented: a newline inside a value ends the
+# line, and everything after it parses as fresh options. A token carrying
+# `url = https://evil` plus `insecure` buys the attacker a SECOND transfer that
+# ships the credential to a host of their choosing, and `proto = all` cancels
+# the --proto '=https' on the command line. Escaping is the wrong answer here —
+# a bearer with a line break in it is not a token, it is a tampered file — so
+# this rejects instead. The alphabet is RFC 6750's for a bearer credential.
+token_is_safe() { # token_is_safe TOKEN
+    [[ "$1" =~ ^[A-Za-z0-9._~+/=-]+$ ]]
+}
+
+# The ONLY place a curl config file is built, so the check above cannot be
+# skipped by a future call site. Prints nothing and returns 1 for a token that
+# must not reach curl.
+curl_auth_cfg() { # curl_auth_cfg TOKEN
+    token_is_safe "$1" || return 1
+    printf 'header = "Authorization: Bearer %s"\nheader = "anthropic-beta: oauth-2025-04-20"\n' "$1"
 }
 
 # The write side hangs too: open(2) for writing on a FIFO waits for a reader
@@ -957,9 +979,10 @@ _fetch_usage() {
         # Headers go in through a config file on stdin, never argv: an
         # `-H "Authorization: Bearer …"` sits in /proc/<pid>/cmdline for the
         # whole transfer, readable by every process of this user. The balance
-        # fetch below already did this; both now do.
-        _resp_body=$(printf 'header = "Authorization: Bearer %s"\nheader = "anthropic-beta: oauth-2025-04-20"\n' \
-            "$access_token" | curl --config - -s --max-time 10 \
+        # fetch below already did this; both now do. A rejected token yields an
+        # empty config, so curl asks unauthenticated and gets a 401 — it never
+        # gets attacker-written option lines.
+        _resp_body=$(curl_auth_cfg "$access_token" | curl --config - -s --max-time 10 \
             --proto '=https' --max-filesize "$MAX_RESP_BYTES" \
             -w '\n%{http_code}' "$API_URL") || true
         # Belt for --max-filesize, and it is needed. Measured on curl 8.21.0: a
@@ -986,7 +1009,7 @@ _fetch_usage() {
     if [[ "$_http_code" == "200" ]] && [[ -n "$_resp_body" ]] && jq -e '.five_hour' <<< "$_resp_body" &>/dev/null; then
         usage="$_resp_body"
         _ctmp=$(mktemp "$CACHE_DIR/.usage.XXXXXX")
-        printf '%s' "$usage" > "$_ctmp" && mv "$_ctmp" "$cache_file"
+        printf '%s' "$usage" > "$_ctmp" && mv "$_ctmp" "$cache_file" || rm -f "$_ctmp"
         rm -f "$stale_marker" "$net_wait_marker" "$CACHE_DIR/.last_error"
     elif [[ "$_http_code" == "000" ]]; then
         # No HTTP response after the retry budget — network still settling or
@@ -1042,9 +1065,9 @@ _fetch_balance() {
     local _credits_url="${API_BASE_URL}/api/oauth/organizations/${_org_uuid}/prepaid/credits"
     local _credits_raw _credits_code _credits_body
     # Feed the bearer header through stdin so the token never appears in the
-    # curl argv/process list.
-    _credits_raw=$(printf 'header = "Authorization: Bearer %s"\nheader = "anthropic-beta: oauth-2025-04-20"\n' \
-        "$access_token" | curl --config - -s --max-time 10 \
+    # curl argv/process list, and through the guarded builder so it cannot
+    # carry option lines of its own.
+    _credits_raw=$(curl_auth_cfg "$access_token" | curl --config - -s --max-time 10 \
         --proto '=https' --max-filesize "$MAX_RESP_BYTES" \
         -w '\n%{http_code}' "$_credits_url") || true
     # Same belt as the usage fetch; there is no retry loop here to break out of,
@@ -1118,6 +1141,11 @@ net_deadline=$(( SECONDS + net_budget ))
 creds=$(read_bounded "$CREDS" "$MAX_STATE_BYTES") || creds=""
 jq -e . <<< "$creds" &>/dev/null || die "Invalid credentials file.\nRun <b>claude</b> to log in."
 access_token=$(jq -r 'try (.claudeAiOauth.accessToken // empty) catch empty' <<< "$creds")
+# A token that cannot go into a curl config file is not a token this script can
+# use at all, so it is dropped here and the empty check below reports it the
+# way a missing one is reported. Rejecting at the SOURCE, not at the call site,
+# is what keeps every later use safe.
+token_is_safe "$access_token" || access_token=""
 refresh_token=$(jq -r 'try (.claudeAiOauth.refreshToken // empty) catch empty' <<< "$creds")
 expires_at=$(jq -r 'try (.claudeAiOauth.expiresAt // 0) catch 0' <<< "$creds")
 expires_at="${expires_at%%.*}" # truncate float (e.g. 5000.0 → 5000)
@@ -1164,8 +1192,13 @@ if (( expires_s < now_s + REFRESH_BUFFER )); then
         sleep "$NET_RETRY_DELAY"
     done
 
-    if [[ "$refresh_code" == "200" ]] && [[ -n "$resp" ]] && jq -e '.access_token' <<< "$resp" &>/dev/null; then
-        access_token=$(jq -r '.access_token' <<< "$resp")
+    # The refreshed token is the SECOND way one reaches the curl config, and it
+    # comes off the wire, so it is validated exactly like the stored one. A
+    # non-string or option-carrying `.access_token` now fails the refresh
+    # instead of being written back into the credentials file.
+    _new_token=$(jq -r 'try ((.access_token | strings) // "") catch ""' <<< "$resp" 2>/dev/null) || _new_token=""
+    if [[ "$refresh_code" == "200" ]] && token_is_safe "$_new_token"; then
+        access_token="$_new_token"
         new_refresh=$(jq -r '.refresh_token // empty' <<< "$resp")
         expires_in=$(jq -r 'try (((.expires_in | numbers) // 0) | floor | if (. > 1e12 or . < 0) then 0 else . end) catch 0' <<< "$resp")
         expires_in="${expires_in%%.*}" # truncate float (e.g. 3600.0 → 3600)
@@ -1177,7 +1210,7 @@ if (( expires_s < now_s + REFRESH_BUFFER )); then
            --arg rt "${new_refresh:-$refresh_token}" \
            --argjson ea "$new_expires_at" \
            '.claudeAiOauth.accessToken=$at | .claudeAiOauth.refreshToken=$rt | .claudeAiOauth.expiresAt=$ea' \
-           <<< "$creds" > "$tmp" && mv "$tmp" "$CREDS"
+           <<< "$creds" > "$tmp" && mv "$tmp" "$CREDS" || rm -f "$tmp"
         rm -f "$CACHE_DIR/.last_error"
     else
         auth_ok=false

