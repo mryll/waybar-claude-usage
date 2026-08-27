@@ -31,6 +31,9 @@ check_absent() { # <desc> <pattern> <file>
 #    and the not-installed path is only reachable without an exit.
 check "startRun resets sawExit"            grep -qF 'sawExit = false' "$panel"
 check "onExited sets sawExit"              grep -qF 'root.sawExit = true' "$panel"
+check "startRun resets tripwireFired"     grep -qF 'tripwireFired = false' "$panel"
+check "the empty branch gates on the per-run tripwire flag, not stale text" \
+                                           grep -qF 'if (tripwireFired) {' "$panel"
 check "fallback gated on !sawExit"         grep -qF '} else if (!sawExit) {' "$panel"
 check "a run that exited empty never claims not-installed" \
                                            grep -qF 'produced no output (exit ' "$panel"

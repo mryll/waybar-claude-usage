@@ -104,6 +104,10 @@ Panel {
   property int exitCode: 0
   property var pendingCmd: null
 
+  // True when this run's collector refused oversize output. Its message
+  // must survive finalizeRun; a stale error from a previous run must not.
+  property bool tripwireFired: false
+
   // True when onExited fired for the current run. A missing command emits
   // no exited. This separates "could not start" from "ran, no output".
   // Probed live: exited always arrives before running drops.
@@ -139,6 +143,7 @@ Panel {
     processDone = false
     capturedText = ""
     sawExit = false
+    tripwireFired = false
     exitCode = 0
     lastArgs = args
     statusProc.command = [resolvedBin].concat(args)
@@ -175,8 +180,8 @@ Panel {
       // error: keep it. (2) No exited = failed start: try the bundled
       // copy once, or report not-installed. (3) The process ran and
       // printed nothing: an operational error, never "not installed".
-      if (root.loadError !== "") {
-        // Already explained (tripwire). Nothing to add.
+      if (tripwireFired) {
+        // Already explained by this run's tripwire. Nothing to add.
       } else if (!sawExit) {
         if (resolvedBin === binName && bundledCmd !== "") {
           // Switch to the clone's copy and re-run this request. The early
@@ -708,6 +713,7 @@ Panel {
       readonly property int maxChars: 1024 * 1024
       onStreamFinished: {
         if (text.length > maxChars) {
+          root.tripwireFired = true
           root.capturedText = ""
           root.setError(root.binName + " returned more than " + maxChars + " characters — refusing it")
         } else {
