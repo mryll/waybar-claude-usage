@@ -80,6 +80,8 @@ Panel {
   readonly property bool showLabel: setting("showLabel", true) === true
   readonly property string barWindowSetting: String(setting("barWindow", "Session"))
 
+  readonly property string binName: "claudebar"
+
   // Process run state machine: the collector and the exit signal race, so a
   // run only finalizes once both have reported (with a timer fallback for
   // failed starts where the collector never fires). A refresh requested while
@@ -99,7 +101,7 @@ Panel {
   property var pendingCmd: null
 
   function buildCmd(force) {
-    return force ? ["claudebar", "--json", "--refresh"] : ["claudebar", "--json"]
+    return force ? [binName, "--json", "--refresh"] : [binName, "--json"]
   }
 
   function refresh(force) {
@@ -147,7 +149,7 @@ Panel {
       // of this family lives. The one message the core cannot emit is the one
       // about its own absence.
       if (root.loadError === "")
-        setError("claudebar produced no output — not installed or not on PATH?\n\n"
+        setError(binName + " produced no output — not installed or not on PATH?\n\n"
                  + "Install it with:  yay -S claudebar\n"
                  + "Then open this panel again.")
     } else {
@@ -169,8 +171,8 @@ Panel {
     try { d = JSON.parse(out) } catch (e) { d = null }
     if (d === null || typeof d !== "object") {
       setError(exitCode !== 0
-        ? "claudebar failed (exit " + exitCode + ")"
-        : "claudebar returned malformed output")
+        ? binName + " failed (exit " + exitCode + ")"
+        : binName + " returned malformed output")
       return
     }
     if (d.loading === true) {
@@ -619,7 +621,6 @@ Panel {
 
   Process {
     id: statusProc
-    command: ["claudebar", "--json"]
     // A command that does not exist gives NEITHER `started` NOR `exited` —
     // Quickshell just drops `running` back to false. That is the only signal a
     // failed start emits, and without this handler the panel sits on its
@@ -656,7 +657,7 @@ Panel {
       onStreamFinished: {
         if (text.length > maxChars) {
           root.capturedText = ""
-          root.setError("claudebar returned more than " + maxChars + " characters — refusing it")
+          root.setError(root.binName + " returned more than " + maxChars + " characters — refusing it")
         } else {
           root.capturedText = text
         }
