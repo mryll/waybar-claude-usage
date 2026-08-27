@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "mryll.claudebar",
   "name": "Claudebar",
-  "version": "1.0.0",
+  "version": "0.9.1",
   "author": "mryll",
   "license": "MIT",
   "description": "Claude AI plan usage (claudebar) in the Omarchy bar: session, weekly, and per-model limits with pacing.",
