@@ -82,6 +82,10 @@ Panel {
 
   readonly property string binName: "claudebar"
 
+  // One constant, two users: the error message shows it and the copy
+  // button copies it.
+  readonly property string installCmd: "yay -S claudebar"
+
   // Process run state machine: the collector and the exit signal race, so a
   // run only finalizes once both have reported (with a timer fallback for
   // failed starts where the collector never fires). A refresh requested while
@@ -100,20 +104,44 @@ Panel {
   property int exitCode: 0
   property var pendingCmd: null
 
+  // True when onExited fired for the current run. A missing command emits
+  // no exited. This separates "could not start" from "ran, no output".
+  // Probed live: exited always arrives before running drops.
+  property bool sawExit: false
+
+  // The command that runs. PATH first, always: the AUR release must win
+  // when it exists. Changes to bundledCmd only after a failed START, and
+  // keeps that value until the shell restarts.
+  property string resolvedBin: binName
+
+  // Set by BarWidget.qml: path of the script inside the plugin clone.
+  // Empty = no fallback.
+  property string bundledCmd: ""
+
+  // Args of the current run, for the fallback retry.
+  property var lastArgs: []
+
+  // True only when PATH and bundle both failed to START. Gates the copy
+  // button. Operational errors never set it.
+  property bool notInstalled: false
+
   function buildCmd(force) {
-    return force ? [binName, "--json", "--refresh"] : [binName, "--json"]
+    return force ? ["--json", "--refresh"] : ["--json"]
   }
 
   function refresh(force) {
     startRun(buildCmd(force === true))
   }
 
-  function startRun(cmd) {
-    if (statusProc.running) { pendingCmd = cmd; return }
+  function startRun(args) {
+    if (statusProc.running) { pendingCmd = args; return }
     collectorDone = false
     processDone = false
     capturedText = ""
-    statusProc.command = cmd
+    sawExit = false
+    exitCode = 0
+    lastArgs = args
+    statusProc.command = [resolvedBin].concat(args)
     statusProc.running = true
   }
 
@@ -140,18 +168,34 @@ Panel {
   property bool pluginStale: false
 
   function finalizeRun() {
+    notInstalled = false
     var text = capturedText.trim()
     if (text === "") {
-      // Only when nothing has explained the emptiness already. The collector's
-      // tripwire ALSO leaves capturedText empty, and there "not installed" is
-      // plainly false: the binary answered, it answered too much. The install
-      // hint lives HERE and not in the core, which is where every other message
-      // of this family lives. The one message the core cannot emit is the one
-      // about its own absence.
-      if (root.loadError === "")
-        setError(binName + " produced no output — not installed or not on PATH?\n\n"
-                 + "Install it with:  yay -S claudebar\n"
+      // Empty output has three causes. (1) The tripwire already set an
+      // error: keep it. (2) No exited = failed start: try the bundled
+      // copy once, or report not-installed. (3) The process ran and
+      // printed nothing: an operational error, never "not installed".
+      if (root.loadError !== "") {
+        // Already explained (tripwire). Nothing to add.
+      } else if (!sawExit) {
+        if (resolvedBin === binName && bundledCmd !== "") {
+          // Switch to the clone's copy and re-run this request. The early
+          // return leaves pendingCmd for the retry's finalize.
+          resolvedBin = bundledCmd
+          var args = lastArgs
+          Qt.callLater(function() { startRun(args) })
+          return
+        }
+        notInstalled = true
+        setError(binName + " could not start — not installed or not on PATH?\n\n"
+                 + "Install it with:  " + installCmd + "\n"
+                 + (resolvedBin !== binName
+                    ? "(the bundled copy at " + resolvedBin + " also failed to start)\n"
+                    : "")
                  + "Then open this panel again.")
+      } else {
+        setError(binName + " produced no output (exit " + exitCode + ")")
+      }
     } else {
       handle(text)
     }
@@ -173,6 +217,13 @@ Panel {
       setError(exitCode !== 0
         ? binName + " failed (exit " + exitCode + ")"
         : binName + " returned malformed output")
+      return
+    }
+    // The script stamps every --json document with schema_version 2. This
+    // catches an old AUR CLI under a newer panel. A schema bump must change
+    // script, panel and tests in one commit.
+    if (Number(d.schema_version) !== 2) {
+      setError(binName + " returned an unexpected document (not schema_version 2) — mismatched CLI version?")
       return
     }
     if (d.loading === true) {
@@ -634,6 +685,7 @@ Panel {
       root.maybeFinalize()
     }
     onExited: function(code) {
+      root.sawExit = true
       root.exitCode = code
       root.processDone = true
       // Failed-start case: the collector may never fire, so arm a fallback.
@@ -665,6 +717,14 @@ Panel {
         root.maybeFinalize()
       }
     }
+  }
+
+  // The copy button shows a check for a moment.
+  property bool installCopied: false
+  Timer {
+    id: copiedReset
+    interval: 1500
+    onTriggered: root.installCopied = false
   }
 
   Timer {
@@ -786,7 +846,7 @@ Panel {
             Text {
               id: errorText
               anchors.left: parent.left
-              anchors.right: parent.right
+              anchors.right: copyInstallButton.visible ? copyInstallButton.left : parent.right
               anchors.verticalCenter: parent.verticalCenter
               anchors.leftMargin: Style.space(12)
               anchors.rightMargin: Style.space(12)
@@ -796,6 +856,30 @@ Panel {
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
               wrapMode: Text.WordWrap
+            }
+
+            // Copies installCmd as one argv element: no shell line, no
+            // trailing newline. Gated on notInstalled, never on error text.
+            PanelActionButton {
+              id: copyInstallButton
+              visible: root.notInstalled
+              anchors.right: parent.right
+              anchors.rightMargin: Style.space(8)
+              anchors.verticalCenter: parent.verticalCenter
+              // nf-md-content_copy / nf-md-check, written literally (a "\u"
+              // escape takes exactly four hex digits; these are five).
+              iconText: root.installCopied ? "󰄬" : "󰆏"
+              tooltipText: root.installCopied ? "Copied" : "Copy install command"
+              foreground: root.dim
+              hoverColor: root.foreground
+              fontFamily: root.fontFamily
+              fontSize: Style.font.caption
+              size: Style.space(20)
+              onClicked: {
+                Util.execArgv(["wl-copy", root.installCmd])
+                root.installCopied = true
+                copiedReset.restart()
+              }
             }
           }
 
