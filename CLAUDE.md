@@ -92,7 +92,7 @@ programs across a full refresh cycle.
 
 ## Release
 
-1. Commit `chore: release X.Y.Z` on `develop` bumping the `manifest.json` version (the script carries no version string; the tag and the manifest ARE the version), push.
-2. Move master to the release — master only advances here: `git push origin develop:master`. Then `git tag vX.Y.Z && git push origin --tags`.
+1. Merge the work into `master`. In the release commit (`chore: release X.Y.Z`): bump the `manifest.json` version (the script carries no version string; the tag and the manifest ARE the version). Push.
+2. `git tag vX.Y.Z && git push origin --tags`.
 3. `gh release create vX.Y.Z` (bash widget: source-only release, nothing to build).
 4. Only then bump the AUR package (`claudebar`) per the workspace `AGENTS.md` (`~/Work/personal/AGENTS.md`).
