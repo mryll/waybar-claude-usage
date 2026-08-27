@@ -153,7 +153,7 @@ TOOLTIP_PACE_PTS=false
 # siguiente si la anterior no está instalada. El paquete de Arch
 # ttf-jetbrains-mono-nerd NO provee la familia "…Mono", así que fijar solo
 # ese nombre caía en la proporcional del sistema sin decir nada.
-TOOLTIP_FONT="JetBrainsMono Nerd Font Mono, JetBrainsMono Nerd Font, monospace"
+TOOLTIP_FONT="JetBrainsMono Nerd Font, JetBrainsMono Nerd Font Mono, monospace"
 JSON_MODE=false
 FORCE_REFRESH=false
 NO_COLOR_SET=false

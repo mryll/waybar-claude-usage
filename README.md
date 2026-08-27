@@ -564,10 +564,10 @@ The tooltip is pinned to a monospace font. That is not decoration: its rules are
 The default is a **list** of families, tried in order:
 
 ```
-JetBrainsMono Nerd Font Mono, JetBrainsMono Nerd Font, monospace
+JetBrainsMono Nerd Font, JetBrainsMono Nerd Font Mono, monospace
 ```
 
-Pango falls through to the next name when one is not installed. This matters: the Arch package `ttf-jetbrains-mono-nerd` does **not** ship the `…Mono` family, so pinning that one name alone used to fall back to your system's proportional font without saying so.
+Pango falls through to the next name when one is not installed. Both families are fully monospaced — every glyph, icons included, advances 0.6 em — so the rules align the same with either. The difference is the drawn size of the icons: the `…Mono` family shrinks them to fit the cell, about 40% smaller. The non-Mono family draws them at full size, and for that reason it comes first. The Arch package `ttf-jetbrains-mono-nerd` ships both families; `ttf-jetbrains-mono-nerd-basic` — the one Omarchy installs — ships only the non-Mono one.
 
 To use a different font, name any monospace family (or your own list):
 
