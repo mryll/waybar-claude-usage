@@ -146,7 +146,14 @@ Panel {
     tripwireFired = false
     exitCode = 0
     lastArgs = args
-    statusProc.command = [resolvedBin].concat(args)
+    // Through sh, never direct: handing Quickshell 0.3.1 a nonexistent binary
+    // aborts the whole shell inside the failed start (issue #6) — before any
+    // signal reaches this QML, so no handler here can catch it. sh always
+    // exists, so the start always succeeds; a failed exec makes sh itself
+    // exit 127 (not found) or 126 (not executable), which finalizeRun maps
+    // to the failed-start path. "$0"/"$@" keep the path and args as argv
+    // elements — nothing is re-parsed by the shell.
+    statusProc.command = ["/bin/sh", "-c", 'exec "$0" "$@"', resolvedBin].concat(args)
     statusProc.running = true
   }
 
@@ -177,12 +184,18 @@ Panel {
     var text = capturedText.trim()
     if (text === "") {
       // Empty output has three causes. (1) The tripwire already set an
-      // error: keep it. (2) No exited = failed start: try the bundled
-      // copy once, or report not-installed. (3) The process ran and
-      // printed nothing: an operational error, never "not installed".
+      // error: keep it. (2) Failed start: try the bundled copy once, or
+      // report not-installed. (3) The process ran and printed nothing: an
+      // operational error, never "not installed". A failed start is now
+      // sh exiting 126/127 (the exec failed; sh's own message goes to
+      // stderr, so stdout stays empty) — a deliberate approximation: a
+      // foreign broken claudebar exiting 126/127 empty lands here too,
+      // and falling back to the bundled script is the right move for it
+      // as well. !sawExit stays as the belt for a Quickshell that emits
+      // no exited at all.
       if (tripwireFired) {
         // Already explained by this run's tripwire. Nothing to add.
-      } else if (!sawExit) {
+      } else if (!sawExit || exitCode === 126 || exitCode === 127) {
         if (resolvedBin === binName && bundledCmd !== "") {
           // Switch to the clone's copy and re-run this request. The early
           // return leaves pendingCmd for the retry's finalize.
@@ -681,8 +694,9 @@ Panel {
     // Quickshell just drops `running` back to false. That is the only signal a
     // failed start emits, and without this handler the panel sits on its
     // loading text for ever: maybeFinalize() waits on processDone, which
-    // nothing would ever set. This IS the first run of anyone who installed
-    // the plugin from the marketplace and does not have the CLI yet.
+    // nothing would ever set. The sh wrapper in startRun means this path
+    // should no longer be reachable (sh always starts), but it stays as the
+    // belt for it.
     onRunningChanged: {
       if (running) return
       root.processDone = true

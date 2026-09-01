@@ -27,14 +27,26 @@ check_absent() { # <desc> <pattern> <file>
     fi
 }
 
-# -- failed-start discrimination: sawExit is reset per run and set on exit,
-#    and the not-installed path is only reachable without an exit.
+# -- the run goes through sh, never direct: handing Quickshell a nonexistent
+#    binary aborts the whole shell inside the failed start (issue #6), before
+#    any QML signal fires. sh always starts; a failed exec is sh exiting
+#    126/127, which the empty branch maps to the failed-start path.
+check "the command is wrapped in sh" \
+    grep -qF "statusProc.command = [\"/bin/sh\", \"-c\", 'exec \"\$0\" \"\$@\"', resolvedBin].concat(args)" "$panel"
+check "statusProc.command is assigned exactly once" \
+    test "$(grep -cF 'statusProc.command =' "$panel")" = 1
+check_absent "the direct (unwrapped) form is banned" 'statusProc.command = [resolvedBin]' "$panel"
+
+# -- failed-start discrimination: sawExit is reset per run and set on exit;
+#    the not-installed path is reachable without an exit (belt) or on sh's
+#    exec failing with 126/127.
 check "startRun resets sawExit"            grep -qF 'sawExit = false' "$panel"
 check "onExited sets sawExit"              grep -qF 'root.sawExit = true' "$panel"
 check "startRun resets tripwireFired"     grep -qF 'tripwireFired = false' "$panel"
 check "the empty branch gates on the per-run tripwire flag, not stale text" \
                                            grep -qF 'if (tripwireFired) {' "$panel"
-check "fallback gated on !sawExit"         grep -qF '} else if (!sawExit) {' "$panel"
+check "fallback gated on !sawExit or exec-failure codes" \
+    grep -qF '} else if (!sawExit || exitCode === 126 || exitCode === 127) {' "$panel"
 check "a run that exited empty never claims not-installed" \
                                            grep -qF 'produced no output (exit ' "$panel"
 
