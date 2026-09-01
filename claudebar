@@ -1224,7 +1224,24 @@ transient_stale=false
 
 [[ -n "$access_token" ]] || die "No token.\nRun <b>claude</b> to log in."
 
+# The write-back temp is staged BEFORE the POST, and beside its target. Both
+# halves matter. Same-directory: a bare mktemp lands in /tmp, which is a tmpfs
+# here — a different filesystem from ~/.claude — where `mv` degrades from
+# rename(2) to copy+unlink and an interruption can leave a torn credentials
+# file (issue #5). Before the POST: a 200 from the token endpoint may ROTATE
+# the refresh token and invalidate the stored one, so a refresh whose result
+# cannot be persisted must not run at all — skipping it leaves the stored
+# tokens untouched for the next run to retry.
+cred_tmp=""
 if (( expires_s < now_s + REFRESH_BUFFER )); then
+    cred_tmp=$(mktemp "${CREDS%/*}/.credentials.XXXXXX" 2>/dev/null) || cred_tmp=""
+    if [[ -z "$cred_tmp" ]]; then
+        auth_ok=false
+        refresh_failure_kind="transient"
+    fi
+fi
+
+if [[ -n "$cred_tmp" ]]; then
     # Synchronous refresh — 25s timeout covers cold boot when DHCP is still settling.
     # Transient failures (no HTTP response) are retried until the shared deadline —
     # same policy as the usage fetch — so a cold-boot race doesn't cost a full interval.
@@ -1278,18 +1295,31 @@ if (( expires_s < now_s + REFRESH_BUFFER )); then
         [[ "$expires_in" =~ ^[0-9]+$ ]] || expires_in=3600
         new_expires_at=$(( $(date +%s) * 1000 + expires_in * 1000 ))
 
-        tmp=$(mktemp)
-        # Both tokens reach jq through the environment for the same reason as
-        # the request body above: `--arg at "$access_token"` publishes the
-        # fresh bearer in jq's command line to every process of this user. The
-        # expiry is a number and public, so it stays an argument.
-        at="$access_token" rt="${new_refresh:-$refresh_token}" \
-        jq --argjson ea "$new_expires_at" \
-           '.claudeAiOauth.accessToken=$ENV.at | .claudeAiOauth.refreshToken=$ENV.rt | .claudeAiOauth.expiresAt=$ea' \
-           <<< "$creds" > "$tmp" && mv "$tmp" "$CREDS" || rm -f "$tmp"
-        rm -f "$CACHE_DIR/.last_error"
+        # Re-read before replacing: the flock serializes claudebar instances,
+        # but NOT the claude CLI, and the POST above takes seconds. If the file
+        # changed under us (or the re-read comes back truncated), the CLI
+        # refreshed on its own — its tokens are the fresher ones, so ours are
+        # dropped instead of overwriting its write. Best-effort mitigation, not
+        # a CAS: the check-then-rename window is milliseconds, and a writer
+        # landing inside it still gets clobbered.
+        current=$(read_bounded "$CREDS" "$MAX_STATE_BYTES") || current=""
+        if [[ "$current" == "$creds" ]] && ! read_was_truncated "$current" "$MAX_STATE_BYTES"; then
+            # Both tokens reach jq through the environment for the same reason
+            # as the request body above: `--arg at "$access_token"` publishes
+            # the fresh bearer in jq's command line to every process of this
+            # user. The expiry is a number and public, so it stays an argument.
+            at="$access_token" rt="${new_refresh:-$refresh_token}" \
+            jq --argjson ea "$new_expires_at" \
+               '.claudeAiOauth.accessToken=$ENV.at | .claudeAiOauth.refreshToken=$ENV.rt | .claudeAiOauth.expiresAt=$ea' \
+               <<< "$creds" > "$cred_tmp" && mv "$cred_tmp" "$CREDS" \
+               || rm -f "$cred_tmp" 2>/dev/null || true
+        else
+            rm -f "$cred_tmp" 2>/dev/null || true
+        fi
+        rm -f "$CACHE_DIR/.last_error" 2>/dev/null || true
     else
         auth_ok=false
+        rm -f "$cred_tmp" 2>/dev/null || true
         if [[ "$refresh_code" == "000" ]]; then
             # No HTTP response reached us — DHCP/DNS settling at boot, offline,
             # or actual timeout. Mark the episode so sibling instances skip

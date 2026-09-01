@@ -250,12 +250,18 @@ _run_spy() { # _run_spy <label> <claude-json-setup-fn>
     mkdir -p "$home/.claude" "$home/.cache/claudebar" "$home/bin" \
         || { echo "HARNESS SETUP FAILED" >&2; exit 1; }
     SPY_CURL_ARGV="$home/curl-argv.log"; SPY_CURL_STDIN="$home/curl-stdin.log"
-    SPY_JQ_ARGV="$home/jq-argv.log"
-    : > "$SPY_CURL_ARGV"; : > "$SPY_CURL_STDIN"; : > "$SPY_JQ_ARGV"
+    SPY_JQ_ARGV="$home/jq-argv.log"; SPY_STAGE_LOG="$home/stage.log"
+    : > "$SPY_CURL_ARGV"; : > "$SPY_CURL_STDIN"; : > "$SPY_JQ_ARGV"; : > "$SPY_STAGE_LOG"
     { printf '#!/usr/bin/env bash\n'
       printf 'printf "%%s " "$@" >> %q; printf "\\n" >> %q\n' "$SPY_CURL_ARGV" "$SPY_CURL_ARGV"
       printf 'cat >> %q 2>/dev/null\n' "$SPY_CURL_STDIN"
       printf 'if [[ "$*" == *oauth/token* ]]; then\n'
+      # The write-back temp must already sit BESIDE the target while the token
+      # endpoint is being called: staged before the POST (a 200 may rotate the
+      # refresh token, so an unpersistable refresh must never start) and in the
+      # same directory (a /tmp temp makes the mv a non-atomic cross-fs copy).
+      # The 6-?  glob matches the mktemp XXXXXX suffix, never .credentials.json.
+      printf 'ls "$HOME/.claude/".credentials.?????? >> %q 2>/dev/null\n' "$SPY_STAGE_LOG"
       printf '  printf "%%s\\n200" %q\n' "$SPY_REFRESH_RESP"
       printf 'elif [[ "$*" == *prepaid/credits* ]]; then\n'
       printf '  printf "%%s\\n200" %q\n' '{"amount":4200}'
@@ -344,6 +350,25 @@ done
 grep -qF '/prepaid/credits' <<< "$_spy_argv" \
     && _ok "small .claude.json: the credits request happens" \
     || _no "small .claude.json: the credits request happens" "argv log: $_spy_argv"
+
+# The rewrite really LANDED: the jq argv check above only proves the filter
+# ran, not that its output survived the staging and the mv. The file is the
+# assertion — both new tokens, read back after the full cycle.
+_creds_after=$(cat "$SPY_HOME/.claude/.credentials.json")
+[[ "$(jq -r '.claudeAiOauth.accessToken' <<< "$_creds_after")" == "$SPY_NEW_ACCESS" ]] \
+    && _ok "rewrite: the new access token is in the FILE" \
+    || _no "rewrite: the new access token is in the FILE" "file was: $_creds_after"
+[[ "$(jq -r '.claudeAiOauth.refreshToken' <<< "$_creds_after")" == "$SPY_NEW_REFRESH" ]] \
+    && _ok "rewrite: the new refresh token is in the FILE" \
+    || _no "rewrite: the new refresh token is in the FILE" "file was: $_creds_after"
+# Same-dir staging, observed at POST time by the curl stub (see _run_spy) —
+# and nothing left behind once the cycle is over.
+grep -q . "$SPY_STAGE_LOG" \
+    && _ok "staging: the temp sits beside the target during the POST" \
+    || _no "staging: the temp sits beside the target during the POST" "stage log empty"
+compgen -G "$SPY_HOME/.claude/.credentials.??????" >/dev/null \
+    && _no "staging: no temp left behind" "$(ls -A "$SPY_HOME/.claude")" \
+    || _ok "staging: no temp left behind"
 rm -rf "$SPY_HOME"
 
 # --- an oversize ~/.claude.json degrades to "no credits data", it does not hang ---
@@ -357,6 +382,98 @@ grep -qF '/prepaid/credits' <<< "$_spy_argv" \
     && _no "5MB .claude.json: no credits request" "argv log: $_spy_argv" \
     || _ok "5MB .claude.json: no credits request"
 rm -rf "$SPY_HOME"
+
+# --- mktemp failure for the credentials temp: the refresh must not RUN ---
+# The temp is staged before the POST precisely because a 200 may rotate the
+# refresh token: a refresh whose result cannot be persisted would invalidate
+# the stored token and keep nothing. So the assertion is not "it degrades
+# nicely" but "the token endpoint is never called" — and the stored
+# credentials are byte-identical afterwards. Exit 0 + valid JSON, as always.
+_test_mktemp_fail() {
+    local home real_mktemp argvlog creds_before
+    home="$(mktemp -d)" || { echo "HARNESS SETUP FAILED" >&2; exit 1; }
+    real_mktemp="$(command -v mktemp)" || { echo "HARNESS SETUP FAILED" >&2; exit 1; }
+    mkdir -p "$home/.claude" "$home/.cache/claudebar" "$home/bin" \
+        || { echo "HARNESS SETUP FAILED" >&2; exit 1; }
+    argvlog="$home/curl-argv.log"; : > "$argvlog"
+    { printf '#!/usr/bin/env bash\n'
+      printf 'printf "%%s " "$@" >> %q; printf "\\n" >> %q\n' "$argvlog" "$argvlog"
+      printf 'exit 1\n'
+    } > "$home/bin/curl" && chmod +x "$home/bin/curl" \
+        || { echo "HARNESS SETUP FAILED" >&2; exit 1; }
+    # Fails ONLY for the credentials template; every cache temp passes through.
+    { printf '#!/usr/bin/env bash\n'
+      printf 'for a in "$@"; do [[ "$a" == *.credentials.* ]] && exit 1; done\n'
+      printf 'exec %q "$@"\n' "$real_mktemp"
+    } > "$home/bin/mktemp" && chmod +x "$home/bin/mktemp" \
+        || { echo "HARNESS SETUP FAILED" >&2; exit 1; }
+    # expiresAt in the past is what forces the refresh path.
+    creds_before="{\"claudeAiOauth\":{\"accessToken\":\"$SPY_ACCESS\",\"refreshToken\":\"$SPY_REFRESH\",\"expiresAt\":1000,\"subscriptionType\":\"max\"}}"
+    printf '%s' "$creds_before" > "$home/.claude/.credentials.json"
+    printf '%s' '{"oauthAccount":{"organizationUuid":"org-test"}}' > "$home/.claude.json"
+    printf '%s' "$GOOD" > "$home/.cache/claudebar/usage.json"
+    OUT=$(run_pinned "$home" env CLAUDEBAR_TEST_NET_RETRY_DELAY=0 \
+            CLAUDEBAR_TEST_NET_QUICK_BUDGET=0 CLAUDEBAR_TEST_NET_LONG_BUDGET=0 \
+            timeout 20 "$SCRIPT"); RC=$?
+    assert_exit0 "mktemp fail: exit 0"
+    assert_json_valid "mktemp fail: valid JSON"
+    # Both output modes: the contract holds for the waybar document AND --json.
+    OUT=$(run_pinned "$home" env CLAUDEBAR_TEST_NET_RETRY_DELAY=0 \
+            CLAUDEBAR_TEST_NET_QUICK_BUDGET=0 CLAUDEBAR_TEST_NET_LONG_BUDGET=0 \
+            timeout 20 "$SCRIPT" --json); RC=$?
+    assert_exit0 "mktemp fail --json: exit 0"
+    assert_json_valid "mktemp fail --json: valid JSON"
+    grep -q 'oauth/token' "$argvlog" \
+        && _no "mktemp fail: the token endpoint is never called" "argv: $(cat "$argvlog")" \
+        || _ok "mktemp fail: the token endpoint is never called"
+    [[ "$(cat "$home/.claude/.credentials.json")" == "$creds_before" ]] \
+        && _ok "mktemp fail: the stored credentials are untouched" \
+        || _no "mktemp fail: the stored credentials are untouched" \
+               "file was: $(cat "$home/.claude/.credentials.json")"
+    rm -rf "$home"
+}
+_test_mktemp_fail
+
+# --- the CLI writes the file DURING the refresh POST: its write survives ---
+# The flock serializes claudebar instances, not the claude CLI. The curl stub
+# makes the race deterministic: while "answering" the token endpoint it
+# replaces the credentials file, exactly like a CLI that refreshed on its own
+# mid-POST. The compare-before-write must then DROP claudebar's version —
+# the CLI's tokens stay, the refreshed ones are used in memory only.
+_test_concurrent_write() {
+    local home cli_creds creds_after
+    home="$(mktemp -d)" || { echo "HARNESS SETUP FAILED" >&2; exit 1; }
+    mkdir -p "$home/.claude" "$home/.cache/claudebar" "$home/bin" \
+        || { echo "HARNESS SETUP FAILED" >&2; exit 1; }
+    cli_creds='{"claudeAiOauth":{"accessToken":"CLIWROTEACCESS-eee","refreshToken":"CLIWROTEREFRESH-fff","expiresAt":4102444800000,"subscriptionType":"max"}}'
+    { printf '#!/usr/bin/env bash\n'
+      printf 'if [[ "$*" == *oauth/token* ]]; then\n'
+      printf '  printf "%%s" %q > "$HOME/.claude/.credentials.json"\n' "$cli_creds"
+      printf '  printf "%%s\\n200" %q\n' "$SPY_REFRESH_RESP"
+      printf 'else\n'
+      printf '  printf "%%s\\n200" %q\n' "$GOOD"
+      printf 'fi\n'
+    } > "$home/bin/curl" && chmod +x "$home/bin/curl" \
+        || { echo "HARNESS SETUP FAILED" >&2; exit 1; }
+    printf '%s' "{\"claudeAiOauth\":{\"accessToken\":\"$SPY_ACCESS\",\"refreshToken\":\"$SPY_REFRESH\",\"expiresAt\":1000,\"subscriptionType\":\"max\"}}" \
+        > "$home/.claude/.credentials.json"
+    printf '%s' '{"oauthAccount":{"organizationUuid":"org-test"}}' > "$home/.claude.json"
+    printf '%s' "$GOOD" > "$home/.cache/claudebar/usage.json"
+    OUT=$(run_pinned "$home" env CLAUDEBAR_TEST_NET_RETRY_DELAY=0 \
+            CLAUDEBAR_TEST_NET_QUICK_BUDGET=0 CLAUDEBAR_TEST_NET_LONG_BUDGET=0 \
+            timeout 20 "$SCRIPT" --refresh); RC=$?
+    assert_exit0 "concurrent write: exit 0"
+    assert_json_valid "concurrent write: valid JSON"
+    creds_after=$(cat "$home/.claude/.credentials.json")
+    [[ "$creds_after" == "$cli_creds" ]] \
+        && _ok "concurrent write: the CLI's write survives" \
+        || _no "concurrent write: the CLI's write survives" "file was: $creds_after"
+    compgen -G "$home/.claude/.credentials.??????" >/dev/null \
+        && _no "concurrent write: no temp left behind" "$(ls -A "$home/.claude")" \
+        || _ok "concurrent write: no temp left behind"
+    rm -rf "$home"
+}
+_test_concurrent_write
 
 # --- the fetch lock is refused on the DESCRIPTOR, not on a stat of the path ---
 # The pre-open `writable_path` check was a race of its own; the open is now
