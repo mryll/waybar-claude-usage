@@ -372,28 +372,25 @@ Panel {
     var lines = []
     for (var i = 0; i < criticalOthers.length; i++) {
       var entry = criticalOthers[i]
-      lines.push(entry.title + ": " + Math.round(Number(entry.w.used_pct || 0)) + "%")
+      lines.push(stripMarkup(entry.title) + ": " + Math.round(Number(entry.w.used_pct || 0)) + "%")
     }
     return lines.join("\n")
-  }
-
-  // The shell's shared tooltip renders this, outside the plugin's control, so
-  // the API-supplied window names are escaped and then wrapped: the <span>
-  // forces AutoText into rich-text mode, which is what makes the escaped
-  // entities decode instead of showing up as &amp;.
-  function safeTooltip(s) {
-    return "<span>" + String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;").replace(/\n/g, "<br/>") + "</span>"
   }
 
   // Empty when there is no mark — Bar.showTooltip short-circuits on empty text,
   // so the bar face stays tooltip-free in the normal case and the panel remains
   // the detail view.
+  //
+  // Plain text, no escaping: the shell's tooltip label is a PlainText Text
+  // (Bar.qml, tooltipLabel), so markup is printed verbatim — escaping and
+  // wrapping this string put a literal "<span>Session: 96%</span>" on the bar.
+  // The API-supplied window names are stripped of <>& in criticalOthersText
+  // instead, which reads the same under PlainText and AutoText alike.
   readonly property string barTooltip: {
     var parts = []
     if (hasCriticalOther) parts.push(criticalOthersText)
     if (barStale) parts.push(" Stale — showing the last data from " + (updatedText() || "earlier"))
-    return parts.length > 0 ? safeTooltip(parts.join("\n")) : ""
+    return parts.join("\n")
   }
 
   // The dot is a warning, so it takes the gauge's critical anchor (under the
@@ -584,9 +581,11 @@ Panel {
     return bar ? bar.background : Color.background
   }
 
-  // For external strings handed to shell-owned Texts we cannot force into
-  // PlainText (PanelHero's meta, which also uppercases — breaking escaped
-  // entities): strip the markup-significant characters instead.
+  // For external strings handed to shell-owned Texts whose textFormat the
+  // plugin does not set — PanelHero's meta (which also uppercases, breaking
+  // escaped entities) and the bar tooltip: strip the markup-significant
+  // characters instead of escaping them, so the string is right whether that
+  // Text parses markup or prints it verbatim.
   function stripMarkup(s) {
     return String(s).replace(/[<>&]/g, " ").replace(/\s+/g, " ").trim()
   }
