@@ -377,23 +377,22 @@ Panel {
     return lines.join("\n")
   }
 
-  // The shell's shared tooltip renders this, outside the plugin's control, so
-  // the API-supplied window names are escaped and then wrapped: the <span>
-  // forces AutoText into rich-text mode, which is what makes the escaped
-  // entities decode instead of showing up as &amp;.
-  function safeTooltip(s) {
-    return "<span>" + String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;").replace(/\n/g, "<br/>") + "</span>"
-  }
-
   // Empty when there is no mark — Bar.showTooltip short-circuits on empty text,
   // so the bar face stays tooltip-free in the normal case and the panel remains
   // the detail view.
+  //
+  // Plain text, handed over raw: the shell's tooltip label is a PlainText Text
+  // (Bar.qml, tooltipLabel — declared upstream since omarchy 3af7675), so
+  // markup is printed verbatim. Escaping the string and wrapping it in a
+  // <span> put a literal "<span>Session: 96%</span>" on the bar. No escaping
+  // and no stripping here: the API-supplied window names keep their <>&
+  // (the CLI's raw-name contract, tests/test_json.sh), and PlainText cannot
+  // interpret them as markup.
   readonly property string barTooltip: {
     var parts = []
     if (hasCriticalOther) parts.push(criticalOthersText)
-    if (barStale) parts.push(" Stale — showing the last data from " + (updatedText() || "earlier"))
-    return parts.length > 0 ? safeTooltip(parts.join("\n")) : ""
+    if (barStale) parts.push("Stale — showing the last data from " + (updatedText() || "earlier"))
+    return parts.join("\n")
   }
 
   // The dot is a warning, so it takes the gauge's critical anchor (under the

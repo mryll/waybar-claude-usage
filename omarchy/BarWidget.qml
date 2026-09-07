@@ -121,9 +121,10 @@ BarWidget {
     // answered 429 and back again on the next poll. The bar face now degrades
     // the same way codexbar's does.
     // The panel is the detail view, so the bar face normally carries no
-    // tooltip. The one exception is the alarm dot: a 4px mark can't say what
-    // it is about, so while it shows, hovering names the window that is maxed
-    // out. Empty string the rest of the time — no dot, no tooltip.
+    // tooltip. Two exceptions: the alarm dot — a 4px mark can't say what it
+    // is about, so while it shows, hovering names the window that is maxed
+    // out — and the stale mark, which says how old the data on the bar is.
+    // Empty string the rest of the time — no mark, no tooltip.
     tooltipText: root.panelItem ? root.panelItem.barTooltip : ""
 
     onPressed: function(b) {
