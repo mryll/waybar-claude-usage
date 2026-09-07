@@ -372,7 +372,7 @@ Panel {
     var lines = []
     for (var i = 0; i < criticalOthers.length; i++) {
       var entry = criticalOthers[i]
-      lines.push(stripMarkup(entry.title) + ": " + Math.round(Number(entry.w.used_pct || 0)) + "%")
+      lines.push(entry.title + ": " + Math.round(Number(entry.w.used_pct || 0)) + "%")
     }
     return lines.join("\n")
   }
@@ -381,15 +381,17 @@ Panel {
   // so the bar face stays tooltip-free in the normal case and the panel remains
   // the detail view.
   //
-  // Plain text, no escaping: the shell's tooltip label is a PlainText Text
-  // (Bar.qml, tooltipLabel), so markup is printed verbatim — escaping and
-  // wrapping this string put a literal "<span>Session: 96%</span>" on the bar.
-  // The API-supplied window names are stripped of <>& in criticalOthersText
-  // instead, which reads the same under PlainText and AutoText alike.
+  // Plain text, handed over raw: the shell's tooltip label is a PlainText Text
+  // (Bar.qml, tooltipLabel — declared upstream since omarchy 3af7675), so
+  // markup is printed verbatim. Escaping the string and wrapping it in a
+  // <span> put a literal "<span>Session: 96%</span>" on the bar. No escaping
+  // and no stripping here: the API-supplied window names keep their <>&
+  // (the CLI's raw-name contract, tests/test_json.sh), and PlainText cannot
+  // interpret them as markup.
   readonly property string barTooltip: {
     var parts = []
     if (hasCriticalOther) parts.push(criticalOthersText)
-    if (barStale) parts.push(" Stale — showing the last data from " + (updatedText() || "earlier"))
+    if (barStale) parts.push("Stale — showing the last data from " + (updatedText() || "earlier"))
     return parts.join("\n")
   }
 
@@ -581,11 +583,9 @@ Panel {
     return bar ? bar.background : Color.background
   }
 
-  // For external strings handed to shell-owned Texts whose textFormat the
-  // plugin does not set — PanelHero's meta (which also uppercases, breaking
-  // escaped entities) and the bar tooltip: strip the markup-significant
-  // characters instead of escaping them, so the string is right whether that
-  // Text parses markup or prints it verbatim.
+  // For external strings handed to shell-owned Texts we cannot force into
+  // PlainText (PanelHero's meta, which also uppercases — breaking escaped
+  // entities): strip the markup-significant characters instead.
   function stripMarkup(s) {
     return String(s).replace(/[<>&]/g, " ").replace(/\s+/g, " ").trim()
   }
